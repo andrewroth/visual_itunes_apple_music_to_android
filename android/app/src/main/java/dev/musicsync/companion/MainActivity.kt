@@ -886,22 +886,26 @@ private fun ColumnScope.LogCard(events: List<String>) {
                         val endFraction = (1f - thumbHeightFraction - startFraction)
                             .coerceAtLeast(0f)
                         Column(modifier = Modifier.fillMaxSize()) {
-                            Spacer(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(startFraction)
-                            )
+                            if (startFraction > 0f) {
+                                Spacer(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(startFraction)
+                                )
+                            }
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(thumbHeightFraction)
                                     .background(Color(0x66000000), RoundedCornerShape(999.dp))
                             )
-                            Spacer(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(endFraction)
-                            )
+                            if (endFraction > 0f) {
+                                Spacer(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(endFraction)
+                                )
+                            }
                         }
                     }
                 }
