@@ -113,6 +113,25 @@ pub struct Settings {
     /// `ignored_devices` because it survives renames.
     #[serde(rename = "ignored_device_ids", default)]
     pub ignored_device_ids: Vec<String>,
+
+    /// Most-recently-seen phones (by successful HELLO), capped to the
+    /// last 10 distinct `device_id`s in last-seen-first order. On
+    /// launch the app probes each `ws_url` in parallel as a fallback
+    /// path for when mDNS/UDP discovery is unreliable (router blocks
+    /// multicast, phone is on a sleepy Wi-Fi power-save state, etc.).
+    #[serde(rename = "recent_devices", default)]
+    pub recent_devices: Vec<RecentDevice>,
+}
+
+/// One entry in [Settings::recent_devices]. Identity is `device_id`;
+/// the rest is bookkeeping for the launch-probe and for sorting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecentDevice {
+    pub device_id: String,
+    pub device_name: String,
+    pub ws_url: String,
+    /// Unix epoch milliseconds of the most recent successful HELLO.
+    pub last_seen_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

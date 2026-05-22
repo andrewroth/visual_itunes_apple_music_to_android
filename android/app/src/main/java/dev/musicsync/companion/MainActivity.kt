@@ -131,7 +131,28 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 @OptIn(ExperimentalMaterial3Api::class)
-                Scaffold(topBar = { TopAppBar(title = { Text("MusicSync companion") }) }) { padding ->
+                Scaffold(
+                    topBar = { TopAppBar(title = { Text("MusicSync companion") }) },
+                    // Anchor Quit at the bottom of the screen so it
+                    // doesn't move around as the page content grows
+                    // (paired list, logs, sync banner). Scaffold handles
+                    // the inset padding for us.
+                    bottomBar = {
+                        androidx.compose.foundation.layout.Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                        ) {
+                            QuitAppButton(
+                                transferActive = syncActiveState.value,
+                                onQuit = {
+                                    service?.stopServer()
+                                    finishAffinity()
+                                },
+                            )
+                        }
+                    },
+                ) { padding ->
                     Column(
                         modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -150,13 +171,6 @@ class MainActivity : ComponentActivity() {
                             path = musicRootState.value,
                             onChange = { uri, flags -> service?.setMusicRoot(uri, flags) },
                             disabled = syncActiveState.value,
-                        )
-                        QuitAppButton(
-                            transferActive = syncActiveState.value,
-                            onQuit = {
-                                service?.stopServer()
-                                finishAffinity()
-                            },
                         )
                         if (syncActiveState.value) {
                             SyncProgressBanner(progress = syncProgressState.value)

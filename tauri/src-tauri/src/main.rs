@@ -1397,7 +1397,19 @@ fn start_heartbeat(
                 match frame {
                     Ok(Message::Text(t)) => {
                         match serde_json::from_str::<ServerMessage>(&t) {
-                            Ok(ServerMessage::HelloOk { .. }) => { authed = true; break; }
+                            Ok(ServerMessage::HelloOk { device_id, device_name, .. }) => {
+                                // Stamp this device into recent_devices so a
+                                // future launch can fall back to its ws_url
+                                // if discovery doesn't find it via mDNS/UDP.
+                                record_recent_device(
+                                    &app_handle,
+                                    &device_id,
+                                    &device_name,
+                                    &ws_url,
+                                );
+                                authed = true;
+                                break;
+                            }
                             Ok(ServerMessage::Error { message }) => {
                                 tracing::info!("heartbeat HELLO rejected: {message}");
                                 // "bad token" is permanent — the phone
@@ -1589,6 +1601,184 @@ fn start_heartbeat(
     let mut guard = state.lock().unwrap();
     guard.heartbeat_task = Some(handle);
     Ok(())
+}
+
+/// Fallback discovery path: take the stored `recent_devices` snapshot
+/// and probe each `ws_url` in parallel, emitting `discovery_found` for
+/// any that answer HELLO_OK with a matching `device_id`. Runs alongside
+/// mDNS/UDP discovery on startup so we never have to wait for the
+/// network's broadcast story to be reliable — the worst case is "the
+/// phone moved to a new IP" in which case the probe fails and the
+/// regular discovery picks it up later.
+fn start_recent_devices_probe(app: AppHandle) {
+    let snapshot: Vec<musicsync_core::settings::RecentDevice> = {
+        let state = app.state::<Mutex<AppState>>();
+        let guard = state.lock().unwrap();
+        if guard.settings.device_token.is_none() {
+            return;
+        }
+        guard.settings.recent_devices.clone()
+    };
+    if snapshot.is_empty() {
+        return;
+    }
+    for entry in snapshot {
+        let app_for_probe = app.clone();
+        tauri::async_runtime::spawn(async move {
+            probe_recent_device(app_for_probe, entry).await;
+        });
+    }
+}
+
+async fn probe_recent_device(
+    app: AppHandle,
+    entry: musicsync_core::settings::RecentDevice,
+) {
+    use futures_util::{SinkExt, StreamExt};
+    use musicsync_core::protocol::{ClientMessage, ServerMessage, PROTOCOL_VERSION};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let token = {
+        let state = app.state::<Mutex<AppState>>();
+        let guard = state.lock().unwrap();
+        guard.settings.device_token.clone().unwrap_or_default()
+    };
+    if token.is_empty() {
+        return;
+    }
+    // Bail out fast if the host isn't reachable — we don't want a 3s
+    // TCP SYN timeout × 10 entries blocking other startup work.
+    let connect = tokio_tungstenite::connect_async(&entry.ws_url);
+    let ws = match tokio::time::timeout(std::time::Duration::from_secs(3), connect).await {
+        Ok(Ok((w, _))) => w,
+        Ok(Err(e)) => {
+            tracing::debug!("recent probe {} failed: {e}", entry.ws_url);
+            return;
+        }
+        Err(_) => {
+            tracing::debug!("recent probe {} timed out", entry.ws_url);
+            return;
+        }
+    };
+    let (mut sink, mut stream) = ws.split();
+    let (u, h) = pair::desktop_identity();
+    let hello = ClientMessage::Hello {
+        token,
+        protocol_version: PROTOCOL_VERSION,
+        desktop_user: u,
+        desktop_host: h,
+    };
+    let txt = match serde_json::to_string(&hello) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    if sink.send(Message::Text(txt.into())).await.is_err() {
+        return;
+    }
+    // Wait for HELLO_OK with a short overall budget. Bail on anything
+    // else — Errors, Close, timeout — without surfacing the failure
+    // (the regular discovery flow handles user-facing logging).
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(frame) = stream.next().await {
+            match frame {
+                Ok(Message::Text(t)) => {
+                    if let Ok(ServerMessage::HelloOk { device_id, device_name, .. }) =
+                        serde_json::from_str::<ServerMessage>(&t)
+                    {
+                        return Some((device_id, device_name));
+                    } else {
+                        return None; // unexpected reply (Error etc.)
+                    }
+                }
+                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
+                _ => return None,
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    // Best-effort close; we don't need the result.
+    let _ = sink.send(Message::Close(None)).await;
+
+    let Some((device_id, device_name)) = outcome else { return };
+    // Only fire if the device_id still matches the stored entry. A
+    // different device on the same ws_url should NOT be auto-treated as
+    // the paired phone — regular discovery / pairing handles that case.
+    if !entry.device_id.is_empty() && device_id != entry.device_id {
+        tracing::info!(
+            "recent probe {}: device_id changed ({} -> {}), ignoring",
+            entry.ws_url,
+            entry.device_id,
+            device_id,
+        );
+        return;
+    }
+    // Synthesise a discovery_found event so the frontend's existing
+    // dispatcher handles the rest exactly as it would for an mDNS hit.
+    let host = entry
+        .ws_url
+        .trim_start_matches("ws://")
+        .trim_start_matches("wss://")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let port = entry
+        .ws_url
+        .rsplit(':')
+        .next()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(musicsync_core::protocol::DEFAULT_PORT);
+    let _ = app.emit(
+        "discovery_found",
+        discovery::DiscoveryFoundEvent {
+            ws_url: entry.ws_url.clone(),
+            device_id,
+            device_name,
+            host,
+            port,
+        },
+    );
+}
+
+/// Update the `recent_devices` list with this device: move/insert at
+/// the head (last-seen first) and trim to 10 entries. Persists settings.
+/// `device_id` is the key — empty `device_id` (legacy companion) is a
+/// no-op because there's nothing stable to dedup on.
+fn record_recent_device(
+    app: &AppHandle,
+    device_id: &str,
+    device_name: &str,
+    ws_url: &str,
+) {
+    if device_id.is_empty() {
+        return;
+    }
+    let state = app.state::<Mutex<AppState>>();
+    let path = {
+        let mut guard = state.lock().unwrap();
+        guard.settings.recent_devices.retain(|d| d.device_id != device_id);
+        guard.settings.recent_devices.insert(
+            0,
+            musicsync_core::settings::RecentDevice {
+                device_id: device_id.to_string(),
+                device_name: device_name.to_string(),
+                ws_url: ws_url.to_string(),
+                last_seen_ms: now_ms(),
+            },
+        );
+        guard.settings.recent_devices.truncate(10);
+        guard.settings_path.clone()
+    };
+    let snapshot = {
+        let guard = state.lock().unwrap();
+        guard.settings.clone()
+    };
+    if let Err(e) = snapshot.save(&path) {
+        tracing::warn!("failed to persist recent_devices: {e}");
+    }
 }
 
 /// Apply an incoming DEVICE_RENAMED notification: persist the new display
@@ -1966,6 +2156,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(state))
         .setup(|app| {
+            // Fast-path discovery: probe every ws_url in recent_devices in
+            // parallel right now. On a "phone is on a sleepy AP that drops
+            // multicast" network this brings the green dot back in <1s
+            // instead of waiting for mDNS / UDP-scan to find the phone.
+            start_recent_devices_probe(app.handle().clone());
+
             // Background poll: watch the configured library_path for mtime
             // changes every 10 seconds and emit `library_changed`. The
             // frontend reloads on that event. No-op if no library_path set.
