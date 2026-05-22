@@ -155,11 +155,13 @@ class MainActivity : ComponentActivity() {
                     },
                 ) { padding ->
                     // Two-tab layout: "Main" (status, pairing, address)
-                    // and "Log" (event stream). Header (TopAppBar above)
-                    // and Quit (below) stay pinned in both views so the
-                    // user always sees who they are and can always quit.
+                    // "Connection" (status / device-name / pairings /
+                    // LAN address), "Transfer" (music folder / inventory
+                    // / sync progress), and "Log" (event stream). Header
+                    // (TopAppBar above) and Quit (below) stay pinned in
+                    // all tabs.
                     var selectedTab by rememberSaveable { mutableStateOf(0) }
-                    val tabTitles = listOf("Main", "Log")
+                    val tabTitles = listOf("Connection", "Transfer", "Log")
                     Column(
                         modifier = Modifier.padding(padding).fillMaxSize(),
                     ) {
@@ -183,13 +185,22 @@ class MainActivity : ComponentActivity() {
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
                             when (selectedTab) {
-                                0 -> MainTabContent(
+                                0 -> ConnectionTabContent(
                                     runningState = runningState.value,
                                     connectedClients = connectedClientsState.value,
                                     searchActive = searchActiveState.value,
                                     onResumeSearch = { service?.resumeSearch() },
                                     deviceName = deviceNameState.value,
                                     onRename = { service?.renameDevice(it) },
+                                    hasPairing = hasPairingState.value,
+                                    paired = pairedListState.value,
+                                    onForgetOne = { token ->
+                                        service?.forgetPairing(token)
+                                    },
+                                    onForgetAll = { service?.forgetAllPairings() },
+                                    lanIp = currentLanIp(),
+                                )
+                                1 -> TransferTabContent(
                                     musicRoot = musicRootState.value,
                                     onMusicRootChange = { uri, flags ->
                                         service?.setMusicRoot(uri, flags)
@@ -199,16 +210,9 @@ class MainActivity : ComponentActivity() {
                                     onStopSync = {
                                         service?.stopSync("stopped by user on phone")
                                     },
-                                    hasPairing = hasPairingState.value,
-                                    paired = pairedListState.value,
-                                    onForgetOne = { token ->
-                                        service?.forgetPairing(token)
-                                    },
-                                    onForgetAll = { service?.forgetAllPairings() },
                                     scan = scanState.value,
-                                    lanIp = currentLanIp(),
                                 )
-                                1 -> LogCard(events = logState.value)
+                                2 -> LogCard(events = logState.value)
                             }
                         }
                         QuitAppButton(
@@ -918,28 +922,22 @@ private fun AddressCard(ip: String?) {
 }
 
 /**
- * Body of the "Main" tab. Just a rendering of the existing top-of-page
- * widgets in the same order, broken out so the tab switcher in
- * [MainActivity] stays compact.
+ * Body of the "Connection" tab: anything to do with who's talking to
+ * whom — server status, the phone's display name, the list of paired
+ * desktops, and the fallback LAN address card.
  */
 @Composable
-private fun ColumnScope.MainTabContent(
+private fun ColumnScope.ConnectionTabContent(
     runningState: Boolean,
     connectedClients: List<String>,
     searchActive: Boolean,
     onResumeSearch: () -> Unit,
     deviceName: String,
     onRename: (String) -> Unit,
-    musicRoot: String,
-    onMusicRootChange: (android.net.Uri, Int) -> String?,
-    syncActive: Boolean,
-    syncProgress: SyncService.SyncProgress?,
-    onStopSync: () -> Unit,
     hasPairing: Boolean,
     paired: List<PairedDesktop>,
     onForgetOne: (String) -> Unit,
     onForgetAll: () -> Unit,
-    scan: SyncService.ScanState,
     lanIp: String?,
 ) {
     ServerStatusChip(
@@ -949,6 +947,32 @@ private fun ColumnScope.MainTabContent(
         onResumeSearch = onResumeSearch,
     )
     DeviceNameRow(name = deviceName, onRename = onRename)
+    PairedBanner(
+        hasPairing = hasPairing,
+        count = paired.size,
+        paired = paired,
+        onForgetOne = onForgetOne,
+        onForgetAll = onForgetAll,
+    )
+    // While a desktop is connected, the LAN address card is just noise.
+    if (connectedClients.isEmpty()) {
+        AddressCard(ip = lanIp)
+    }
+}
+
+/**
+ * Body of the "Transfer" tab: the music-folder picker, the in-flight
+ * sync banner + Stop button, and the scan/inventory summary.
+ */
+@Composable
+private fun ColumnScope.TransferTabContent(
+    musicRoot: String,
+    onMusicRootChange: (android.net.Uri, Int) -> String?,
+    syncActive: Boolean,
+    syncProgress: SyncService.SyncProgress?,
+    onStopSync: () -> Unit,
+    scan: SyncService.ScanState,
+) {
     MusicRootRow(
         path = musicRoot,
         onChange = onMusicRootChange,
@@ -958,18 +982,7 @@ private fun ColumnScope.MainTabContent(
         SyncProgressBanner(progress = syncProgress)
         StopSyncButton(onStop = onStopSync)
     }
-    PairedBanner(
-        hasPairing = hasPairing,
-        count = paired.size,
-        paired = paired,
-        onForgetOne = onForgetOne,
-        onForgetAll = onForgetAll,
-    )
     ScanBanner(state = scan)
-    // While a desktop is connected, the LAN address card is just noise.
-    if (connectedClients.isEmpty()) {
-        AddressCard(ip = lanIp)
-    }
 }
 
 @Composable
