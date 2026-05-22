@@ -111,6 +111,10 @@ echo "Pushing tag"
 git push origin "refs/tags/$TAG"
 
 # --- Create the release -----------------------------------------------------
+# Note: heredoc delimiter is intentionally unquoted so ${RUN_ID} etc.
+# interpolate, but that means backticks would be evaluated as command
+# substitution — escape them with \` to keep them literal in the
+# markdown output.
 NOTES=$(cat <<EOF
 Pre-release built from CI run [$RUN_ID](https://github.com/$REPO/actions/runs/$RUN_ID) at commit $SHORT_SHA.
 
@@ -118,11 +122,11 @@ Pre-release built from CI run [$RUN_ID](https://github.com/$REPO/actions/runs/$R
 
 | Platform | File suffix |
 |---|---|
-| Android | `*.apk` |
-| Windows | `*-setup.exe` (NSIS) or `*.msi` |
-| macOS (Apple Silicon) | `*_aarch64.dmg` |
-| macOS (Intel) | `*_x64.dmg` |
-| Linux | `*.AppImage`, `*.deb`, or `*.rpm` |
+| Android | \`*.apk\` |
+| Windows | \`*-setup.exe\` (NSIS) or \`*.msi\` |
+| macOS (Apple Silicon) | \`*_aarch64.dmg\` |
+| macOS (Intel) | \`*_x64.dmg\` |
+| Linux | \`*.AppImage\`, \`*.deb\`, or \`*.rpm\` |
 EOF
 )
 
