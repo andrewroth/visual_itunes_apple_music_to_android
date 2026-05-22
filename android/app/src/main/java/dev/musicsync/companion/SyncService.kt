@@ -56,6 +56,7 @@ class SyncService : Service() {
             store = rememberedDesktopsStore,
             deviceName = { deviceNameStore.get() },
             deviceId = { deviceIdStore.get() },
+            onEvent = { msg -> pushEvent(msg) },
         )
     }
 
@@ -295,7 +296,14 @@ class SyncService : Service() {
                     }
                 },
                 onClientAuthed = { ip ->
+                    val before = rememberedDesktopsStore.list()
                     rememberedDesktopsStore.remember(ip)
+                    // Only log when this is a NEW IP (or it moved to
+                    // the head) — quiet on routine reconnects from the
+                    // same desktop we've already remembered first.
+                    if (before.firstOrNull() != ip) {
+                        pushEvent("Remembered desktop IP $ip for proactive announce")
+                    }
                 },
                 onEvent = { msg -> pushEvent(msg) },
             ),
@@ -307,7 +315,7 @@ class SyncService : Service() {
         // Proactively tell desktops we've ever served that we're back
         // online. Unicast UDP — works on networks that filter broadcast
         // / multicast. Also re-fires on every reconnection (below).
-        desktopAnnouncer.announceOnce()
+        desktopAnnouncer.announceOnce("server start")
         registerNetworkCallback()
         armSearchTimeout()
     }
@@ -326,7 +334,7 @@ class SyncService : Service() {
             as? android.net.ConnectivityManager ?: return
         val cb = object : android.net.ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: android.net.Network) {
-                desktopAnnouncer.announceOnce()
+                desktopAnnouncer.announceOnce("network up")
             }
         }
         try {

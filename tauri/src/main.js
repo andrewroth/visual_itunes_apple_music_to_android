@@ -926,6 +926,11 @@ async function forgetPairing() {
 // button so the user knows nothing was found and can retry on demand.
 let _scanIntervalId = null;
 let _scanTimeoutId = null;
+// Subnet-sweep retry timer. Hoisted to module scope so stopScanCycle
+// can clear it; previously a local const that leaked when
+// startScanCycle was re-entered (e.g. device_dead followed by another
+// trigger), causing duplicate sweeps every cycle.
+let _sweepIntervalId = null;
 
 function stopScanCycle() {
   if (_scanIntervalId != null) {
@@ -935,6 +940,10 @@ function stopScanCycle() {
   if (_scanTimeoutId != null) {
     clearTimeout(_scanTimeoutId);
     _scanTimeoutId = null;
+  }
+  if (_sweepIntervalId != null) {
+    clearInterval(_sweepIntervalId);
+    _sweepIntervalId = null;
   }
 }
 
@@ -955,12 +964,15 @@ function startScanCycle() {
   // Re-sweep every 10s while we're still in searching mode. The mDNS
   // cycle is fast and cheap; the sweep is bounded and only fires
   // again when we haven't found anything.
-  const sweepInterval = setInterval(() => {
-    if (window._wsUrl) { clearInterval(sweepInterval); return; }
+  _sweepIntervalId = setInterval(() => {
+    if (window._wsUrl) {
+      clearInterval(_sweepIntervalId);
+      _sweepIntervalId = null;
+      return;
+    }
     invoke("start_subnet_sweep").catch(() => {});
   }, 10_000);
   _scanTimeoutId = setTimeout(() => {
-    clearInterval(sweepInterval);
     // 30 seconds elapsed with no hit. Final attempt at the remembered
     // manual address before declaring nothing found.
     stopScanCycle();
@@ -1283,17 +1295,10 @@ listen("discovery_found", async (e) => {
   appendLog(`Discovered ${device_name} at ${ws_url}`);
 
   if (lastSettings.device_token) {
-    // We have a token. If we know our paired phone's device_id, only act
-    // on the matching device — that's the durable identity. Otherwise
-    // fall back to trying any hit (legacy pairings without a stored id).
-    if (
-      device_id &&
-      lastSettings.paired_device_id &&
-      device_id !== lastSettings.paired_device_id
-    ) {
-      appendLog(`Ignoring ${device_name}: not the paired phone`);
-      return;
-    }
+    // We have a token — just try it. If the phone rejects it (data
+    // clear, factory reset, different phone using the same display
+    // name, whatever) the auth-fail path in scanDevice's catch will
+    // pop the approve dialog. No silent ignores, no device_id gates.
     showFoundState(device_name, ws_url);
     try {
       await scanDevice();
@@ -1302,7 +1307,7 @@ listen("discovery_found", async (e) => {
       const msg = String(err);
       const looksLikeAuth = /bad token|auth|violated/i.test(msg);
       if (looksLikeAuth) {
-        appendLog(`Stored pairing rejected by ${device_name} — prompting to re-pair.`);
+        appendLog(`${device_name} needs re-pairing — popping approve dialog.`);
         // Same flow as heartbeat_token_rejected: pop the approve dialog
         // instead of just logging, so the user can recover without
         // hunting for the Forget-pairing button.

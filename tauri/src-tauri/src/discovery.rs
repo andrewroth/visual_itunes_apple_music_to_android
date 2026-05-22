@@ -161,17 +161,28 @@ pub fn start_announce_listener(app: AppHandle) {
         let sock = match tokio::net::UdpSocket::bind(("0.0.0.0", ANNOUNCE_PORT)).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!("announce listen bind failed: {e}");
+                let msg = format!(
+                    "Announce listener failed to bind udp:{ANNOUNCE_PORT}: {e}. \
+                     Phones won't be able to push proactive 'I'm here' packets to this desktop.",
+                );
+                tracing::warn!("{msg}");
+                let _ = app.emit("log_line", msg);
                 return;
             }
         };
-        tracing::info!("announce listener bound on udp:{ANNOUNCE_PORT}");
+        let msg = format!(
+            "Listening for proactive phone announcements on udp:{ANNOUNCE_PORT}",
+        );
+        tracing::info!("{msg}");
+        let _ = app.emit("log_line", msg);
         let mut buf = vec![0u8; 4096];
         loop {
             let (n, from) = match sock.recv_from(&mut buf).await {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("announce recv err: {e}");
+                    let m = format!("Announce listener recv error: {e}");
+                    tracing::warn!("{m}");
+                    let _ = app.emit("log_line", m);
                     break;
                 }
             };
@@ -191,6 +202,10 @@ pub fn start_announce_listener(app: AppHandle) {
                 .unwrap_or(DEFAULT_PORT as u64) as u16;
             let host = from.ip().to_string();
             let ws_url = format!("ws://{host}:{port}");
+            let _ = app.emit(
+                "log_line",
+                format!("Phone announce received from {device_name} at {ws_url}"),
+            );
             let _ = app.emit("discovery_found", DiscoveryFoundEvent {
                 ws_url, device_id, device_name, host, port,
             });

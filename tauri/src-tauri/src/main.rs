@@ -1039,6 +1039,17 @@ async fn scan_device(
     Ok(result)
 }
 
+/// Unconditional Log-tab message. Use for connection / discovery
+/// diagnostics a non-developer user should see when reporting a
+/// problem — the verbose toggles are off by default and most users
+/// will never know to turn them on. Mirrored to tracing::info so
+/// stdout / journalctl consumers still see it too.
+pub fn app_log(app: &AppHandle, line: impl AsRef<str>) {
+    let s = line.as_ref();
+    tracing::info!("{s}");
+    let _ = app.emit("log_line", s.to_string());
+}
+
 /// Write a verbose-debug line to both the Log tab (via the `log_line`
 /// event) and a dated file `musicsync-YYYY-MM-DD.log` in the working
 /// directory. No-op when `verbose_logging` is off.
@@ -1388,7 +1399,7 @@ fn start_heartbeat(
     if token.is_empty() {
         // No point opening a presence connection without a token —
         // the phone would reject HELLO and we'd just churn.
-        tracing::info!("heartbeat skipped: no token yet (unpaired)");
+        app_log(&app, "Heartbeat skipped: no pairing token yet (run a pair flow first)");
         return Ok(());
     }
 
@@ -1468,6 +1479,9 @@ fn start_heartbeat(
                                 break;
                             }
                             Ok(ServerMessage::Error { message }) => {
+                                // Don't surface "bad token" verbatim — that
+                                // sounds scary. The frontend handler will
+                                // pop a friendly re-pair dialog.
                                 tracing::info!("heartbeat HELLO rejected: {message}");
                                 // "bad token" is permanent — the phone
                                 // doesn't recognise our token. Retrying
@@ -1488,7 +1502,10 @@ fn start_heartbeat(
             }
             if token_rejected {
                 let _ = app_handle.emit("heartbeat_token_rejected", ());
-                tracing::info!("heartbeat stopping — token rejected; user must re-pair");
+                app_log(
+                    &app_handle,
+                    "Phone needs re-pairing — popping approve dialog.",
+                );
                 return; // exit the task entirely
             }
             if !authed {
@@ -1773,18 +1790,6 @@ async fn probe_recent_device(
     let _ = sink.send(Message::Close(None)).await;
 
     let Some((device_id, device_name)) = outcome else { return };
-    // Only fire if the device_id still matches the stored entry. A
-    // different device on the same ws_url should NOT be auto-treated as
-    // the paired phone — regular discovery / pairing handles that case.
-    if !entry.device_id.is_empty() && device_id != entry.device_id {
-        tracing::info!(
-            "recent probe {}: device_id changed ({} -> {}), ignoring",
-            entry.ws_url,
-            entry.device_id,
-            device_id,
-        );
-        return;
-    }
     // Synthesise a discovery_found event so the frontend's existing
     // dispatcher handles the rest exactly as it would for an mDNS hit.
     let host = entry
@@ -1846,7 +1851,10 @@ async fn sweep_local_subnet(app: AppHandle) {
                 } else { None }
             })
             .collect(),
-        Err(e) => { tracing::warn!("subnet sweep: if_addrs failed: {e}"); return; }
+        Err(e) => {
+            app_log(&app, format!("Subnet sweep skipped: couldn't enumerate network interfaces ({e})"));
+            return;
+        }
     };
     if local_v4s.is_empty() { return; }
 
@@ -1877,7 +1885,10 @@ async fn sweep_local_subnet(app: AppHandle) {
     // We don't await the handles — the spawned tasks emit on success
     // and the rest of the frontend's discovery_found path handles them.
     // Returning early lets the caller continue with other work.
-    tracing::info!("subnet sweep dispatched {} probes", handles.len());
+    app_log(&app, format!(
+        "Subnet sweep started: probing {} hosts on local network for a phone",
+        handles.len(),
+    ));
 }
 
 async fn probe_subnet_host(app: AppHandle, host: std::net::Ipv4Addr) {
@@ -1984,7 +1995,7 @@ async fn probe_subnet_host(app: AppHandle, host: std::net::Ipv4Addr) {
     let _ = sink.send(Message::Close(None)).await;
 
     let Some((device_id, device_name)) = outcome else { return };
-    tracing::info!("subnet sweep found {device_name} at {ws_url}");
+    app_log(&app, format!("Subnet sweep found {device_name} at {ws_url}"));
     let _ = app.emit(
         "discovery_found",
         discovery::DiscoveryFoundEvent {
