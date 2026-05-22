@@ -22,7 +22,7 @@ class MdnsAdvertiser(private val context: Context) {
             // Service instance name uses the device_id so renames don't
             // change the mDNS identity the desktop dedupes on. (Display
             // name still ships via the `name` TXT entry.)
-            serviceName = "MusicSync ${deviceId.take(8)}"
+            serviceName = "Viamta Music Sync ${deviceId.take(8)}"
             serviceType = "_musicsync._tcp."
             setPort(port)
             // Advertise the friendly device name via a TXT record so the

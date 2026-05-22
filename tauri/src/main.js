@@ -194,7 +194,7 @@ function renderMissingPlaylists(library) {
       const name = row?.querySelector("td:first-child")?.textContent || id;
       const ok = window.confirm(
         `Forget "${name}"?\n\n` +
-        `This removes the playlist from MusicSync's remembered list. ` +
+        `This removes the playlist from Viamta Music Sync's remembered list. ` +
         `If a playlist with the same ID later reappears in your Library.xml, ` +
         `it will NOT be automatically re-checked.\n\n` +
         `This does not touch the phone or any music files.`
@@ -849,7 +849,7 @@ function showSearchingState() {
   $("ws_url_display").style.display = "";
   $("ws_url_display").innerHTML =
     `<span class="spinner-border spinner-border-sm me-1"></span> ` +
-    `Scanning for MusicSync App`;
+    `Scanning for Viamta Music Sync App`;
   $("ws_url").style.display = "none";
   $("ws_url_edit").textContent = "Enter manually";
   renderForgetPairingBtn();
@@ -859,7 +859,7 @@ function showSearchingState() {
 function showNoneFoundState() {
   $("ws_url_display").style.display = "";
   $("ws_url_display").innerHTML =
-    `<span class="text-muted">No MusicSync Apps Found.</span> ` +
+    `<span class="text-muted">No Viamta Music Sync Apps Found.</span> ` +
     `<button type="button" id="rescan_btn" class="btn btn-sm btn-link p-0 ms-1">Rescan</button>`;
   $("ws_url").style.display = "none";
   $("ws_url_edit").textContent = "Enter manually";
@@ -1021,7 +1021,7 @@ listen("heartbeat_token_rejected", async () => {
   try {
     const name = window._foundDeviceName || lastSettings.paired_device_name || "(unknown)";
     const url = window._wsUrl || "(unknown address)";
-    const ok = window.confirm(`Found a MusicSync App. Approve?\n\n${name} (${url})`);
+    const ok = window.confirm(`Found a Viamta Music Sync App. Approve?\n\n${name} (${url})`);
     if (ok) {
       await forgetPairing();
       appendLog("Re-pairing — waiting for next discovery hit…");
@@ -1145,7 +1145,7 @@ window.addEventListener("DOMContentLoaded", async () => {
       // JS state can briefly disagree with the actual server side,
       // and there's no harm in confirming.
       const ok = window.confirm(
-        "This will break the current connection and scan for MusicSync Apps. Continue?"
+        "This will break the current connection and scan for Viamta Music Sync Apps. Continue?"
       );
       if (!ok) return;
       // Disconnect the persistent presence WS and drop back to search.
@@ -1156,7 +1156,7 @@ window.addEventListener("DOMContentLoaded", async () => {
       window._foundDeviceName = "";
       setSyncEnabled(false);
       showSearchingState();
-      appendLog("Disconnected — scanning for MusicSync Apps");
+      appendLog("Disconnected — scanning for Viamta Music Sync Apps");
     } else {
       showManualState();
     }
@@ -1264,6 +1264,12 @@ window.addEventListener("DOMContentLoaded", async () => {
   showSearchingState();
   setSyncEnabled(false);
   try { await invoke("start_discovery"); } catch (e) { appendLog(`Discovery failed: ${e}`); }
+  // Fast-path probe of recent_devices ws_urls. Has to run AFTER
+  // listen("discovery_found", …) is wired up above — otherwise the
+  // probe's synthetic event arrives during webview boot and gets
+  // dropped, leaving the address bar stuck on the "Scanning…" → "No
+  // … Apps Found" path even while sync proceeds in the background.
+  try { await invoke("start_recent_probe"); } catch (e) { appendLog(`Recent-probe failed: ${e}`); }
   // showSearchingState() (called above) already kicked off the
   // every-2-seconds UDP broadcast cycle, so no need to fire one here.
   // Attempt initial load if a library path is set.

@@ -1449,18 +1449,20 @@ fn start_heartbeat(
                 last_emitted_alive = Some(true);
             }
 
-            // Active ping/pong loop. We send a WS PING every 1 second
+            // Active ping/pong loop. We send a WS PING every 5 seconds
             // and track the most recent Pong. State machine:
-            //   alive   — got a pong within the last 2 seconds
-            //   yellow  — 2-5 seconds since the last pong
-            //   dead    — 5+ seconds → close and reconnect
+            //   alive   — got a pong within the last 15 seconds
+            //   yellow  — 15-30 seconds since the last pong
+            //   dead    — 30+ seconds → close and reconnect
             //
-            // Tight intervals because killing the companion app on the
-            // phone doesn't always send a TCP FIN — we have to notice
-            // the missing pongs ourselves, and the user expects the
-            // green dot to drop within ~5s when they close the app.
+            // Relaxed intervals so a heavy ongoing transfer (which can
+            // saturate the WiFi link and delay control frames on the
+            // separate heartbeat WS) doesn't get killed mid-flight.
+            // The trade-off is slower "phone closed" detection — up to
+            // ~30s before the green dot drops — but transfers don't
+            // get torn down by a chatty health check.
             let mut last_pong = tokio::time::Instant::now();
-            let mut ping_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut ping_tick = tokio::time::interval(std::time::Duration::from_secs(5));
             ping_tick.tick().await; // immediate first tick consumed
             let mut emitted_yellow = false;
             // Reason the inner loop exited, surfaced in verbose logs so
@@ -1491,7 +1493,7 @@ fn start_heartbeat(
                             }
                         }
                         let since = last_pong.elapsed();
-                        if since > std::time::Duration::from_secs(5) {
+                        if since > std::time::Duration::from_secs(30) {
                             vlog_dyn(
                                 &app_handle,
                                 format!(
@@ -1499,9 +1501,9 @@ fn start_heartbeat(
                                     since.as_secs_f32(),
                                 ),
                             );
-                            exit_reason = "pong timeout (>5s)";
+                            exit_reason = "pong timeout (>30s)";
                             break 'inner;
-                        } else if since > std::time::Duration::from_secs(2) {
+                        } else if since > std::time::Duration::from_secs(15) {
                             if !emitted_yellow {
                                 vlog_dyn(
                                     &app_handle,
@@ -1610,6 +1612,17 @@ fn start_heartbeat(
 /// network's broadcast story to be reliable — the worst case is "the
 /// phone moved to a new IP" in which case the probe fails and the
 /// regular discovery picks it up later.
+///
+/// Invoked from the frontend AFTER its `listen("discovery_found", …)`
+/// handler is registered — running it from Tauri's `setup()` callback
+/// would race the WebView and the event would be dropped before the
+/// listener exists.
+#[tauri::command]
+fn start_recent_probe(app: AppHandle) -> Result<(), String> {
+    start_recent_devices_probe(app);
+    Ok(())
+}
+
 fn start_recent_devices_probe(app: AppHandle) {
     let snapshot: Vec<musicsync_core::settings::RecentDevice> = {
         let state = app.state::<Mutex<AppState>>();
@@ -2156,12 +2169,6 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(state))
         .setup(|app| {
-            // Fast-path discovery: probe every ws_url in recent_devices in
-            // parallel right now. On a "phone is on a sleepy AP that drops
-            // multicast" network this brings the green dot back in <1s
-            // instead of waiting for mDNS / UDP-scan to find the phone.
-            start_recent_devices_probe(app.handle().clone());
-
             // Background poll: watch the configured library_path for mtime
             // changes every 10 seconds and emit `library_changed`. The
             // frontend reloads on that event. No-op if no library_path set.
@@ -2215,6 +2222,7 @@ fn main() {
             stop_heartbeat,
             reveal_working_dir,
             write_text_file,
+            start_recent_probe,
         ])
         .run(tauri::generate_context!())
         .expect("error running MusicSync");

@@ -11,8 +11,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
@@ -25,8 +27,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.collectLatest
@@ -132,26 +139,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 @OptIn(ExperimentalMaterial3Api::class)
                 Scaffold(
-                    topBar = { TopAppBar(title = { Text("MusicSync companion") }) },
-                    // Anchor Quit at the bottom of the screen so it
-                    // doesn't move around as the page content grows
-                    // (paired list, logs, sync banner). Scaffold handles
-                    // the inset padding for us.
-                    bottomBar = {
-                        androidx.compose.foundation.layout.Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                        ) {
-                            QuitAppButton(
-                                transferActive = syncActiveState.value,
-                                onQuit = {
-                                    service?.stopServer()
-                                    finishAffinity()
-                                },
-                            )
-                        }
-                    },
+                    topBar = { TopAppBar(title = { BrandTitle() }) },
                 ) { padding ->
                     Column(
                         modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize(),
@@ -192,6 +180,16 @@ class MainActivity : ComponentActivity() {
                             AddressCard(ip = currentLanIp())
                         }
                         LogCard(events = logState.value)
+                        // Quit lives at the very bottom of the page, below
+                        // the log card. Users scroll down past everything
+                        // else to reach it, so it can't be hit accidentally.
+                        QuitAppButton(
+                            transferActive = syncActiveState.value,
+                            onQuit = {
+                                service?.stopServer()
+                                finishAffinity()
+                            },
+                        )
                     }
 
                     // Modal pair-confirm dialog. Appears whenever the
@@ -205,7 +203,7 @@ class MainActivity : ComponentActivity() {
                             title = {
                                 Text(
                                     if (pending.code != null) "Pair new desktop?"
-                                    else "Found a MusicSync Desktop. Approve?"
+                                    else "Found a Viamta Music Sync Desktop. Approve?"
                                 )
                             },
                             text = {
@@ -269,6 +267,63 @@ private val YellowBg = Color(0xFFFFF4CC)
 private val YellowFg = Color(0xFF5A4500)
 private val GreyBg = Color(0xFFEFEFEF)
 private val GreyFg = Color(0xFF555555)
+
+/**
+ * Top-bar branding block: "Viamta Music Sync" on top with a small
+ * subtitle "Visual iTunes/Apple Music to Android" underneath. Each
+ * first-letter (V, i, A, M, t, A — spells *Viamta*) is colored, the
+ * rest is muted grey so the highlight pops.
+ */
+@Composable
+private fun BrandTitle() {
+    // First letters of each word, in order: V i A M t A.
+    val viamtaColors = listOf(
+        Color(0xFFE53935), // V — red
+        Color(0xFFFB8C00), // i — orange
+        Color(0xFF7CB342), // A — green
+        Color(0xFF1E88E5), // M — blue
+        Color(0xFF8E24AA), // t — purple
+        Color(0xFFD81B60), // A — pink
+    )
+    // Indices of the highlighted letters in the subtitle phrase.
+    // "Visual iTunes/Apple Music to Android"
+    //  0      7      14    20    26 29
+    val subtitle = "Visual iTunes/Apple Music to Android"
+    val highlightIndices = listOf(0, 7, 14, 20, 26, 29)
+    val muted = Color(0xFF6B6B6B)
+    val subtitleAnnotated: AnnotatedString = buildAnnotatedString {
+        for ((i, ch) in subtitle.withIndex()) {
+            val hi = highlightIndices.indexOf(i)
+            if (hi >= 0) {
+                withStyle(SpanStyle(color = viamtaColors[hi], fontWeight = FontWeight.Bold)) {
+                    append(ch)
+                }
+            } else {
+                withStyle(SpanStyle(color = muted)) {
+                    append(ch)
+                }
+            }
+        }
+    }
+    Column {
+        Text(
+            "Viamta Music Sync",
+            fontWeight = FontWeight.SemiBold,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                subtitleAnnotated,
+                fontSize = 10.sp,
+            )
+            Spacer(Modifier.width(6.dp))
+            Image(
+                painter = painterResource(id = R.drawable.logo),
+                contentDescription = null,
+                modifier = Modifier.height(30.dp),
+            )
+        }
+    }
+}
 
 @Composable
 private fun ServerStatusChip(
@@ -712,10 +767,10 @@ private fun QuitAppButton(
     if (confirm) {
         AlertDialog(
             onDismissRequest = { confirm = false },
-            title = { Text("Quit MusicSync?") },
+            title = { Text("Quit Viamta Music Sync?") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("This will stop the MusicSync companion app and close its background server.")
+                    Text("This will stop the Viamta Music Sync companion app and close its background server.")
                     if (transferActive) {
                         Text(
                             "An active transfer is in progress. Quitting now will stop that transfer. " +

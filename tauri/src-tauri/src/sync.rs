@@ -112,40 +112,8 @@ pub async fn run_sync(
     on_scan_complete: impl Fn(usize, usize) + Send + Sync,
 ) -> Result<SyncReport> {
     progress("Connecting...", None);
-    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
-        .await
-        .with_context(|| format!("connecting to {ws_url}"))?;
-    let (mut sink, mut stream) = ws_stream.split();
-
-    // HELLO
     progress("Authenticating...", None);
-    send_msg(
-        &mut sink,
-        &{
-            let (u, h) = crate::pair::desktop_identity();
-            ClientMessage::Hello {
-                token: token.to_string(),
-                protocol_version: PROTOCOL_VERSION,
-                desktop_user: u,
-                desktop_host: h,
-            }
-        },
-    )
-    .await?;
-    let hello_ok = recv_msg(&mut stream).await?;
-    let music_root = match hello_ok {
-        ServerMessage::HelloOk { music_root, protocol_version, .. } => {
-            if protocol_version != PROTOCOL_VERSION {
-                return Err(anyhow!(
-                    "protocol version mismatch: server={} client={}",
-                    protocol_version,
-                    PROTOCOL_VERSION
-                ));
-            }
-            music_root
-        }
-        other => return Err(anyhow!("unexpected response to HELLO: {other:?}")),
-    };
+    let (mut sink, mut stream, music_root) = connect_and_authenticate(ws_url, token).await?;
 
     // MANIFEST
     progress("Scanning...", None);
@@ -257,7 +225,12 @@ pub async fn run_sync(
         completed_ops += 1;
     }
 
-    // Upload missing tracks.
+    // Upload missing tracks. Each file is wrapped in a reconnect-retry
+    // loop so a flaky link doesn't tear down a long sync — when an
+    // attempt fails (timeout, broken pipe, stream closed), we sleep a
+    // moment, reopen the WS + re-HELLO, and re-send THIS track. The
+    // phone writes atomically (.tmp.X → rename) so a half-uploaded file
+    // doesn't appear in the next manifest; retrying just resends.
     progress("Copying...", None);
     let mut uploaded_tracks = 0usize;
     for track_id in &to_upload {
@@ -277,14 +250,54 @@ pub async fn run_sync(
         let frac = op_fraction(step);
         progress(&msg, frac);
         let _ = emit_client_progress(&mut sink, &msg, frac).await;
-        match upload_one_file(&mut sink, &mut stream, track, &music_root).await {
-            Ok(()) => uploaded_tracks += 1,
-            Err(e) => errors.push(format!("{}: {e}", track.name)),
+        let mut backoff_secs: u64 = 1;
+        let mut last_err: Option<String> = None;
+        for attempt in 1..=MAX_OP_ATTEMPTS {
+            if abort_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
+            match upload_one_file(&mut sink, &mut stream, track, &music_root).await {
+                Ok(()) => {
+                    uploaded_tracks += 1;
+                    last_err = None;
+                    // One log-tab line per successful file so the user has a
+                    // complete record of what crossed the wire, not just
+                    // the in-flight "Copying …" pre-message.
+                    progress(
+                        &format!("Uploaded {} ({} bytes) -> {:?}", track.name, track.size, dest),
+                        frac,
+                    );
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    if attempt == MAX_OP_ATTEMPTS { break; }
+                    let retry_msg = format!(
+                        "{}: attempt {}/{} failed: {e}; reconnecting in {}s",
+                        track.name, attempt, MAX_OP_ATTEMPTS, backoff_secs,
+                    );
+                    progress(&retry_msg, frac);
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(15);
+                    match connect_and_authenticate(ws_url, token).await {
+                        Ok((s, st, _root)) => { sink = s; stream = st; }
+                        Err(re) => {
+                            // Reconnect itself failed; loop will try again
+                            // next iteration with the still-dead handles
+                            // (which will surface the error and burn an
+                            // attempt). That's fine — the backoff caps
+                            // request rate either way.
+                            tracing::warn!("reconnect failed mid-sync: {re}");
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(err) = last_err {
+            errors.push(format!("{}: {err} (after {} attempts)", track.name, MAX_OP_ATTEMPTS));
         }
         completed_ops += 1;
     }
 
-    // Upload changed playlists
+    // Upload changed playlists — same reconnect-retry shape as tracks.
     let mut uploaded_playlists = 0usize;
     for (pl, content) in &playlists_to_upload {
         let step = completed_ops + 1;
@@ -299,9 +312,44 @@ pub async fn run_sync(
         let frac = op_fraction(step);
         progress(&msg, frac);
         let _ = emit_client_progress(&mut sink, &msg, frac).await;
-        match upload_playlist(&mut sink, &mut stream, pl, &content).await {
-            Ok(()) => uploaded_playlists += 1,
-            Err(e) => errors.push(format!("playlist {}: {e}", pl.name)),
+        let mut backoff_secs: u64 = 1;
+        let mut last_err: Option<String> = None;
+        for attempt in 1..=MAX_OP_ATTEMPTS {
+            if abort_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
+            match upload_playlist(&mut sink, &mut stream, pl, content).await {
+                Ok(()) => {
+                    uploaded_playlists += 1;
+                    last_err = None;
+                    // One log-tab line per successful playlist write.
+                    let line_count = content
+                        .lines()
+                        .filter(|l| !l.is_empty() && *l != "#EXTM3U")
+                        .count();
+                    progress(
+                        &format!("Wrote playlist {} ({} tracks)", pl.name, line_count),
+                        frac,
+                    );
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    if attempt == MAX_OP_ATTEMPTS { break; }
+                    let retry_msg = format!(
+                        "playlist {}: attempt {}/{} failed: {e}; reconnecting in {}s",
+                        pl.name, attempt, MAX_OP_ATTEMPTS, backoff_secs,
+                    );
+                    progress(&retry_msg, frac);
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(15);
+                    if let Ok((s, st, _root)) = connect_and_authenticate(ws_url, token).await {
+                        sink = s;
+                        stream = st;
+                    }
+                }
+            }
+        }
+        if let Some(err) = last_err {
+            errors.push(format!("playlist {}: {err} (after {} attempts)", pl.name, MAX_OP_ATTEMPTS));
         }
         completed_ops += 1;
     }
@@ -327,6 +375,51 @@ type WsSink = futures_util::stream::SplitSink<
 type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
+
+/// Open a fresh WS, send HELLO, expect HELLO_OK. Returns sink/stream
+/// and the device music root. Used both for the initial connection at
+/// the top of [run_sync] and for the resume-on-disconnect path inside
+/// the per-file upload loops.
+pub(crate) async fn connect_and_authenticate(
+    ws_url: &str,
+    token: &str,
+) -> Result<(WsSink, WsStream, String)> {
+    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
+        .await
+        .with_context(|| format!("connecting to {ws_url}"))?;
+    let (mut sink, mut stream) = ws_stream.split();
+    let (u, h) = crate::pair::desktop_identity();
+    send_msg(
+        &mut sink,
+        &ClientMessage::Hello {
+            token: token.to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            desktop_user: u,
+            desktop_host: h,
+        },
+    )
+    .await?;
+    let music_root = match recv_msg(&mut stream).await? {
+        ServerMessage::HelloOk { music_root, protocol_version, .. } => {
+            if protocol_version != PROTOCOL_VERSION {
+                return Err(anyhow!(
+                    "protocol version mismatch: server={} client={}",
+                    protocol_version,
+                    PROTOCOL_VERSION
+                ));
+            }
+            music_root
+        }
+        ServerMessage::Error { message } => return Err(anyhow!("phone error: {message}")),
+        other => return Err(anyhow!("unexpected response to HELLO: {other:?}")),
+    };
+    Ok((sink, stream, music_root))
+}
+
+/// Per-operation retry budget. Each track / playlist gets this many
+/// attempts before we surface the error to the caller. Reconnect
+/// happens between attempts so a torn-down WS gets rebuilt automatically.
+const MAX_OP_ATTEMPTS: usize = 8;
 
 async fn send_msg(sink: &mut WsSink, msg: &ClientMessage) -> Result<()> {
     let text = serde_json::to_string(msg)?;

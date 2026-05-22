@@ -3,7 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MusicSync</title>
+    <title>Viamta Music Sync</title>
+    <!-- Brand subtitle initial-letter colors. The 6 highlighted glyphs
+         spell "Viamta" — the first letter of each word in the full name
+         "Visual iTunes/Apple Music to Android". -->
+    <style>
+      #brand_subtitle { color: #6b6b6b; font-size: 10px; }
+      #brand_subtitle .b0 { color: #e53935; font-weight: 700; }
+      #brand_subtitle .b1 { color: #fb8c00; font-weight: 700; }
+      #brand_subtitle .b2 { color: #7cb342; font-weight: 700; }
+      #brand_subtitle .b3 { color: #1e88e5; font-weight: 700; }
+      #brand_subtitle .b4 { color: #8e24aa; font-weight: 700; }
+      #brand_subtitle .b5 { color: #d81b60; font-weight: 700; }
+    </style>
     <link
       href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
       rel="stylesheet"
@@ -28,6 +40,19 @@
       });
     </script>
     <script type="module" src="main.js"></script>
+
+    <!-- Top-right brand subtitle. Each first-letter spells "Viamta",
+         matching the productName + the Android companion's brand row. -->
+    <div id="brand_subtitle" style="position: absolute; top: 4px; right: 8px; user-select: none; display: flex; align-items: center; gap: 6px">
+      <span>
+        <span class="b0">V</span>isual
+        <span class="b1">i</span>Tunes/<span class="b2">A</span>pple
+        <span class="b3">M</span>usic
+        <span class="b4">t</span>o
+        <span class="b5">A</span>ndroid
+      </span>
+      <img src="logo.png" alt="" style="height: 30px; width: auto; display: block" />
+    </div>
 
     <ul class="nav nav-tabs mb-2" role="tablist">
       <li class="nav-item" role="presentation">
@@ -406,8 +431,8 @@
 
       <div class="tab-pane fade" id="abouttab" role="tabpanel">
         <p class="mt-3">
-          MusicSync — sync your Music Library to an Android
-          phone running the MusicSync Companion app.
+          Viamta Music Sync — sync your Music Library to an Android
+          phone running the Viamta Music Sync Companion app.
         </p>
         <p>
           GPL-3.0. Source:

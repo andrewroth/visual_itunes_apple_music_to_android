@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MusicSync",
+  "productName": "Viamta Music Sync",
   "version": "0.1.0",
   "identifier": "dev.musicsync.desktop",
   "build": {
@@ -9,7 +9,7 @@
   "app": {
     "windows": [
       {
-        "title": "MusicSync",
+        "title": "Viamta Music Sync",
         "width": 1100,
         "height": 700,
         "minWidth": 700,

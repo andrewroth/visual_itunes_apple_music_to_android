@@ -423,7 +423,7 @@ class SyncService : Service() {
             val mgr = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
             val ch = NotificationChannel(
                 CHANNEL_ID,
-                "MusicSync server",
+                "Viamta Music Sync server",
                 NotificationManager.IMPORTANCE_LOW,
             )
             ch.description = "Background sync server"
@@ -439,7 +439,7 @@ class SyncService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("MusicSync")
+            .setContentTitle("Viamta Music Sync")
             .setContentText(text)
             .setOngoing(true)
             .setSmallIcon(android.R.drawable.stat_sys_upload)

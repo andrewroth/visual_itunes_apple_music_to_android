@@ -19,14 +19,16 @@
 
     <application
         android:allowBackup="true"
-        android:label="MusicSync"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.MusicSync">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="MusicSync">
+            android:label="@string/app_name">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
