@@ -1,0 +1,91 @@
+name: Build
+
+# Triggers a desktop bundle for every push to main, every PR, and on
+# manual dispatch from the Actions tab. The matrix produces:
+#   - musicsync-linux        .deb + .AppImage
+#   - musicsync-windows      .msi + .exe (NSIS)
+#   - musicsync-macos-arm64  .dmg + .app  (Apple Silicon)
+#   - musicsync-macos-x86_64 .dmg + .app  (Intel)
+#
+# Bundles are uploaded as workflow artifacts; download links appear on
+# the run summary page. Public repos get free unlimited runner minutes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            rust_target: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin"
+            label: macos-arm64
+          - platform: macos-13
+            rust_target: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin"
+            label: macos-x86_64
+          - platform: ubuntu-22.04
+            rust_target: ""
+            args: ""
+            label: linux
+          - platform: windows-latest
+            rust_target: ""
+            args: ""
+            label: windows
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's Linux bundler needs webkit + a few -dev packages to compile
+      # the embedded webview bindings.
+      - name: install linux deps
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      # Cache the Cargo registry + target dir between runs so subsequent
+      # builds drop from ~15-25 min to ~5-10 min.
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tauri -> target
+
+      - name: build tauri bundle
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: tauri
+          args: ${{ matrix.args }}
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: musicsync-${{ matrix.label }}
+          # The workspace puts artefacts under tauri/target/<target?>/release/bundle.
+          # Globbing both layouts so we don't miss them either way.
+          path: |
+            tauri/target/release/bundle/**/*
+            tauri/target/*/release/bundle/**/*
+          if-no-files-found: warn
