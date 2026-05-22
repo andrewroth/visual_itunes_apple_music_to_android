@@ -14,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -77,6 +78,9 @@ class MainActivity : ComponentActivity() {
                 svc.syncActive.collectLatest { syncActiveState.value = it }
             }
             lifecycleScope.launch {
+                svc.syncProgress.collectLatest { syncProgressState.value = it }
+            }
+            lifecycleScope.launch {
                 svc.connectedClients.collectLatest { connectedClientsState.value = it }
             }
             lifecycleScope.launch {
@@ -106,6 +110,7 @@ class MainActivity : ComponentActivity() {
     private val deviceNameState = mutableStateOf("")
     private val musicRootState = mutableStateOf("")
     private val syncActiveState = mutableStateOf(false)
+    private val syncProgressState = mutableStateOf<SyncService.SyncProgress?>(null)
     private val connectedClientsState = mutableStateOf<List<String>>(emptyList())
     private val searchActiveState = mutableStateOf(true)
     private val hasPairingState = mutableStateOf(false)
@@ -146,7 +151,15 @@ class MainActivity : ComponentActivity() {
                             onChange = { uri, flags -> service?.setMusicRoot(uri, flags) },
                             disabled = syncActiveState.value,
                         )
+                        QuitAppButton(
+                            transferActive = syncActiveState.value,
+                            onQuit = {
+                                service?.stopServer()
+                                finishAffinity()
+                            },
+                        )
                         if (syncActiveState.value) {
+                            SyncProgressBanner(progress = syncProgressState.value)
                             StopSyncButton(onStop = {
                                 service?.stopSync("stopped by user on phone")
                             })
@@ -589,6 +602,54 @@ private fun DeviceNameRow(name: String, onRename: (String) -> Unit) {
 }
 
 @Composable
+private fun SyncProgressBanner(progress: SyncService.SyncProgress?) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(YellowBg)
+            .padding(12.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "Transfer in progress",
+                color = YellowFg,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(8.dp))
+            if (progress?.fraction != null) {
+                LinearProgressIndicator(
+                    progress = { progress.fraction.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(6.dp),
+                    color = YellowFg,
+                    trackColor = Color(0xFFFFE49C),
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().height(6.dp),
+                    color = YellowFg,
+                    trackColor = Color(0xFFFFE49C),
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                progress?.message ?: "Waiting for desktop progress…",
+                color = YellowFg,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (progress?.fraction != null) {
+                Text(
+                    "${(progress.fraction * 100f).toInt()}%",
+                    color = YellowFg,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun StopSyncButton(onStop: () -> Unit) {
     var confirm by rememberSaveable { mutableStateOf(false) }
     Button(
@@ -612,6 +673,46 @@ private fun StopSyncButton(onStop: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = { onStop(); confirm = false }) {
                     Text("Stop")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirm = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun QuitAppButton(
+    transferActive: Boolean,
+    onQuit: () -> Unit,
+) {
+    var confirm by rememberSaveable { mutableStateOf(false) }
+    OutlinedButton(
+        onClick = { confirm = true },
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB00020)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Quit app")
+    }
+    if (confirm) {
+        AlertDialog(
+            onDismissRequest = { confirm = false },
+            title = { Text("Quit MusicSync?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("This will stop the MusicSync companion app and close its background server.")
+                    if (transferActive) {
+                        Text(
+                            "An active transfer is in progress. Quitting now will stop that transfer. " +
+                            "Files already copied stay on the phone, and the next sync will resume from what's still missing.",
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { onQuit(); confirm = false }) {
+                    Text("Quit")
                 }
             },
             dismissButton = {
@@ -727,17 +828,68 @@ private fun AddressCard(ip: String?) {
 
 @Composable
 private fun ColumnScope.LogCard(events: List<String>) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(events.size) {
+        if (events.isNotEmpty()) {
+            listState.animateScrollToItem(events.lastIndex)
+        }
+    }
     ElevatedCard(modifier = Modifier.fillMaxWidth().weight(1f)) {
         Column(Modifier.padding(16.dp).fillMaxSize()) {
             Text("Log", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(8.dp))
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(events) { e ->
-                    Text(
-                        e,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                    )
+            Box(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize().padding(end = 8.dp),
+                ) {
+                    items(events) { e ->
+                        Text(
+                            e,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+                val total = listState.layoutInfo.totalItemsCount
+                val visible = listState.layoutInfo.visibleItemsInfo.size
+                if (total > visible && visible > 0) {
+                    val thumbHeightFraction = (visible.toFloat() / total.toFloat())
+                        .coerceIn(0.08f, 1f)
+                    val maxOffsetFraction = (1f - thumbHeightFraction).coerceAtLeast(0f)
+                    val startFraction = if (total <= visible) 0f else {
+                        (listState.firstVisibleItemIndex.toFloat() /
+                            (total - visible).toFloat()).coerceIn(0f, 1f) * maxOffsetFraction
+                    }
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight()
+                            .width(4.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(Color(0x22000000)),
+                    ) {
+                        val endFraction = (1f - thumbHeightFraction - startFraction)
+                            .coerceAtLeast(0f)
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            Spacer(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(startFraction)
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(thumbHeightFraction)
+                                    .background(Color(0x66000000), RoundedCornerShape(999.dp))
+                            )
+                            Spacer(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(endFraction)
+                            )
+                        }
+                    }
                 }
             }
         }

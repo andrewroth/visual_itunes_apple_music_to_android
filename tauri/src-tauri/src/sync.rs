@@ -181,46 +181,86 @@ pub async fn run_sync(
         .collect();
     mark_on_device_strict(tracks, &device_files);
 
+    let checked: Vec<&Playlist> = playlists.iter().filter(|p| p.checked).collect();
+    let to_upload = tracks_to_upload(&checked, tracks);
+    let already_present = tracks.values().filter(|t| t.on_device).count();
+    let total_deletes = playlists_to_delete.len() + tracks_to_delete.len();
+    let device_by_name: HashMap<&str, &ManifestPlaylist> =
+        device_playlists.iter().map(|p| (p.name.as_str(), p)).collect();
+    let playlists_to_upload: Vec<(&Playlist, String)> = checked
+        .iter()
+        .filter_map(|pl| {
+            let content = pl.generate_m3u(&music_root, |id| tracks.get(id));
+            let want_upload = match device_by_name.get(pl.device_filename().as_str()) {
+                Some(existing) => !m3u_semantically_equal(&existing.content, &content),
+                None => true,
+            };
+            if want_upload {
+                Some((*pl, content))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let total_ops = total_deletes + to_upload.len() + playlists_to_upload.len();
+    let mut completed_ops = 0usize;
+
+    let op_fraction = |completed: usize| -> Option<f32> {
+        if total_ops == 0 {
+            None
+        } else {
+            Some((completed as f32 / total_ops as f32).clamp(0.0, 1.0))
+        }
+    };
+
     // Delete playlists + any unused-track files. Server returns OK even
     // when the path is absent, so we don't gate on the manifest content.
     let mut deleted_files: usize = 0;
-    let total_deletes = playlists_to_delete.len() + tracks_to_delete.len();
-    let mut del_i = 0usize;
+    let mut errors = Vec::new();
     for name in playlists_to_delete {
-        del_i += 1;
-        let pct = ((del_i as f32 / total_deletes.max(1) as f32) * 100.0).round() as u32;
-        progress(
-            &format!("[{}/{}, {}%] Deleting playlist {:?}", del_i, total_deletes, pct, name),
-            None,
+        let step = completed_ops + 1;
+        let pct = ((step as f32 / total_ops.max(1) as f32) * 100.0).round() as u32;
+        let msg = format!(
+            "[{}/{}, {}%] Deleting playlist {:?}",
+            step,
+            total_ops.max(1),
+            pct,
+            name,
         );
+        let frac = op_fraction(step);
+        progress(&msg, frac);
+        let _ = emit_client_progress(&mut sink, &msg, frac).await;
         let _ = send_msg(&mut sink, &ClientMessage::FileDelete { path: name.clone() }).await;
         if let Ok(ServerMessage::FileDeleteOk { .. }) = recv_msg(&mut stream).await {
             deleted_files += 1;
         }
+        completed_ops += 1;
     }
     for path in tracks_to_delete {
-        del_i += 1;
-        let pct = ((del_i as f32 / total_deletes.max(1) as f32) * 100.0).round() as u32;
-        progress(
-            &format!("[{}/{}, {}%] Deleting unused {:?}", del_i, total_deletes, pct, path),
-            None,
+        let step = completed_ops + 1;
+        let pct = ((step as f32 / total_ops.max(1) as f32) * 100.0).round() as u32;
+        let msg = format!(
+            "[{}/{}, {}%] Deleting unused {:?}",
+            step,
+            total_ops.max(1),
+            pct,
+            path,
         );
+        let frac = op_fraction(step);
+        progress(&msg, frac);
+        let _ = emit_client_progress(&mut sink, &msg, frac).await;
         let _ = send_msg(&mut sink, &ClientMessage::FileDelete { path: path.clone() }).await;
         if let Ok(ServerMessage::FileDeleteOk { .. }) = recv_msg(&mut stream).await {
             deleted_files += 1;
         }
+        completed_ops += 1;
     }
-
-    let checked: Vec<&Playlist> = playlists.iter().filter(|p| p.checked).collect();
-    let to_upload = tracks_to_upload(&checked, tracks);
-    let already_present = tracks.values().filter(|t| t.on_device).count();
 
     // Upload missing tracks.
     progress("Copying...", None);
-    let mut errors = Vec::new();
     let mut uploaded_tracks = 0usize;
-    let total = to_upload.len();
-    for (i, track_id) in to_upload.iter().enumerate() {
+    for track_id in &to_upload {
         if abort_flag.load(std::sync::atomic::Ordering::SeqCst) {
             progress("Aborted by user.", None);
             errors.push("aborted by user".into());
@@ -228,42 +268,46 @@ pub async fn run_sync(
         }
         let Some(track) = tracks.get(track_id) else { continue; };
         let dest = track.playlist_path(&music_root);
-        let n = i + 1;
-        let pct = ((n as f32 / total.max(1) as f32) * 100.0).round() as u32;
-        progress(
-            &format!(
-                "[{}/{}, {}%] Copying {:?} -> {:?}",
-                n, total, pct, track.local_path, dest,
-            ),
-            Some((i as f32) / (total.max(1) as f32)),
+        let step = completed_ops + 1;
+        let pct = ((step as f32 / total_ops.max(1) as f32) * 100.0).round() as u32;
+        let msg = format!(
+            "[{}/{}, {}%] Copying {:?} -> {:?}",
+            step, total_ops.max(1), pct, track.local_path, dest,
         );
+        let frac = op_fraction(step);
+        progress(&msg, frac);
+        let _ = emit_client_progress(&mut sink, &msg, frac).await;
         match upload_one_file(&mut sink, &mut stream, track, &music_root).await {
             Ok(()) => uploaded_tracks += 1,
             Err(e) => errors.push(format!("{}: {e}", track.name)),
         }
+        completed_ops += 1;
     }
 
     // Upload changed playlists
     let mut uploaded_playlists = 0usize;
-    let device_by_name: HashMap<&str, &ManifestPlaylist> =
-        device_playlists.iter().map(|p| (p.name.as_str(), p)).collect();
-    for pl in &checked {
-        let content = pl.generate_m3u(&music_root, |id| tracks.get(id));
-        let want_upload = match device_by_name.get(pl.device_filename().as_str()) {
-            Some(existing) => !m3u_semantically_equal(&existing.content, &content),
-            None => true,
-        };
-        if !want_upload {
-            continue;
-        }
-        progress(&format!("Generating playlist {}", pl.name), None);
+    for (pl, content) in &playlists_to_upload {
+        let step = completed_ops + 1;
+        let pct = ((step as f32 / total_ops.max(1) as f32) * 100.0).round() as u32;
+        let msg = format!(
+            "[{}/{}, {}%] Writing playlist {}",
+            step,
+            total_ops.max(1),
+            pct,
+            pl.name,
+        );
+        let frac = op_fraction(step);
+        progress(&msg, frac);
+        let _ = emit_client_progress(&mut sink, &msg, frac).await;
         match upload_playlist(&mut sink, &mut stream, pl, &content).await {
             Ok(()) => uploaded_playlists += 1,
             Err(e) => errors.push(format!("playlist {}: {e}", pl.name)),
         }
+        completed_ops += 1;
     }
 
     // BYE
+    let _ = emit_client_progress(&mut sink, "Sync complete.", Some(1.0)).await;
     let _ = send_msg(&mut sink, &ClientMessage::Bye).await;
     progress("Sync complete.", Some(1.0));
 
@@ -288,6 +332,21 @@ async fn send_msg(sink: &mut WsSink, msg: &ClientMessage) -> Result<()> {
     let text = serde_json::to_string(msg)?;
     sink.send(Message::Text(text.into())).await?;
     Ok(())
+}
+
+async fn emit_client_progress(
+    sink: &mut WsSink,
+    message: &str,
+    fraction: Option<f32>,
+) -> Result<()> {
+    send_msg(
+        sink,
+        &ClientMessage::Progress {
+            message: message.to_string(),
+            fraction,
+        },
+    )
+    .await
 }
 
 async fn recv_msg(stream: &mut WsStream) -> Result<ServerMessage> {

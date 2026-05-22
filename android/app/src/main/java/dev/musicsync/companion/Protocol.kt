@@ -60,6 +60,13 @@ sealed class ClientMessage {
     data class FileDelete(val path: String) : ClientMessage()
 
     @Serializable
+    @SerialName("PROGRESS")
+    data class Progress(
+        val message: String,
+        val fraction: Float? = null,
+    ) : ClientMessage()
+
+    @Serializable
     @SerialName("BYE")
     data object Bye : ClientMessage()
 }

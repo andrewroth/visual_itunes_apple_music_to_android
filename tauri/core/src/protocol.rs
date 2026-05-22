@@ -16,6 +16,7 @@
 //!   server → PLAYLIST_OK {name} | PLAYLIST_ERR {name, message}
 //!   client → FILE_DELETE {path}    (optional)
 //!   server → FILE_DELETE_OK {path} | FILE_DELETE_ERR
+//!   client → PROGRESS {message, fraction}   (optional, transfer UI hint)
 //!   client → BYE
 //!   server → BYE
 //!
@@ -29,7 +30,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const DEFAULT_PORT: u16 = 7800;
 pub const MDNS_SERVICE_TYPE: &str = "_musicsync._tcp.local.";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ClientMessage {
     Hello {
@@ -70,6 +71,13 @@ pub enum ClientMessage {
     FilePut { path: String, size: u64 },
     PlaylistPut { name: String, content: String },
     FileDelete { path: String },
+    Progress {
+        /// What the desktop is currently doing, e.g. "Copying X" or
+        /// "Deleting Y". The phone shows this in its transfer banner.
+        message: String,
+        /// 0.0 .. 1.0 if the desktop knows the overall sync fraction.
+        fraction: Option<f32>,
+    },
     Bye,
 }
 

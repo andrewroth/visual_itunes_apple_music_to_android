@@ -61,29 +61,40 @@ class SyncService : Service() {
     private val _syncActive = MutableStateFlow(false)
     val syncActive: StateFlow<Boolean> = _syncActive
 
+    data class SyncProgress(
+        val message: String,
+        val fraction: Float? = null,
+    )
+
+    private val _syncProgress = MutableStateFlow<SyncProgress?>(null)
+    val syncProgress: StateFlow<SyncProgress?> = _syncProgress
+
     /** Labels of currently-connected desktops (user@host). Empty list
      *  means nobody is connected. Drives the chip text + the address-
      *  card visibility. */
     private val _connectedClients = MutableStateFlow<List<String>>(emptyList())
     val connectedClients: StateFlow<List<String>> = _connectedClients
 
-    /** True while we're actively expecting a desktop to find us. Flips
-     *  to false after 5 minutes of nobody connecting; UI then shows a
-     *  "Search for desktop app" button instead of the amber spinner. */
+    /** True while we're actively expecting a desktop to find us. When
+     *  [searchTimeoutMs] is negative, search stays active indefinitely. */
     private val _searchActive = MutableStateFlow(true)
     val searchActive: StateFlow<Boolean> = _searchActive
 
-    private val searchTimeoutMs = 5 * 60_000L
+    private val searchTimeoutMs = -1L
     private var searchTimeoutJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.Default)
 
     private fun armSearchTimeout() {
         searchTimeoutJob?.cancel()
         _searchActive.value = true
+        if (searchTimeoutMs < 0L) {
+            searchTimeoutJob = null
+            return
+        }
         searchTimeoutJob = serviceScope.launch {
             delay(searchTimeoutMs)
             _searchActive.value = false
-            pushEvent("No desktop connected after 5 minutes — search paused")
+            pushEvent("No desktop connected after ${searchTimeoutMs / 1000L}s — search paused")
         }
     }
 
@@ -93,7 +104,7 @@ class SyncService : Service() {
     }
 
     /** Called from MainActivity when the user taps "Search for desktop
-     *  app." Re-arms the 5-minute timer so the chip goes back to amber. */
+     *  app." Re-enables the searching state (and timer, if enabled). */
     fun resumeSearch() {
         armSearchTimeout()
         pushEvent("Search resumed")
@@ -252,11 +263,16 @@ class SyncService : Service() {
                 onSyncStarted = {
                     val n = activeSyncCount.incrementAndGet()
                     _syncActive.value = n > 0
+                    if (n == 1) _syncProgress.value = SyncProgress("Preparing transfer…", null)
                     if (n == 1) acquireTransferLocks()
+                },
+                onSyncProgress = { message, fraction ->
+                    _syncProgress.value = SyncProgress(message, fraction)
                 },
                 onSyncEnded = {
                     val n = activeSyncCount.decrementAndGet().coerceAtLeast(0)
                     _syncActive.value = n > 0
+                    if (n == 0) _syncProgress.value = null
                     if (n == 0) releaseTransferLocks()
                 },
                 onClientsChanged = { labels ->

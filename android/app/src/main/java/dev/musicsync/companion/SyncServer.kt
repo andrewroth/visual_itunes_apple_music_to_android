@@ -80,6 +80,8 @@ class SyncServer(private val config: Config) {
          *  FILE_DELETE, or PLAYLIST_PUT). UI uses this to disable
          *  destructive controls (Choose music folder) and show a Stop. */
         val onSyncStarted: () -> Unit = {},
+        /** Fired when the desktop sends a transfer-progress update. */
+        val onSyncProgress: (message: String, fraction: Float?) -> Unit = { _, _ -> },
         /** Fired when a transfer-bearing session ends. */
         val onSyncEnded: () -> Unit = {},
         /** Fired with the labels of currently-connected desktops every
@@ -302,6 +304,10 @@ class SyncServer(private val config: Config) {
                     is ClientMessage.FileDelete -> {
                         if (!didTransfer) { didTransfer = true; config.onSyncStarted() }
                         handleFileDelete(session, msg)
+                    }
+                    is ClientMessage.Progress -> {
+                        if (!didTransfer) { didTransfer = true; config.onSyncStarted() }
+                        config.onSyncProgress(msg.message, msg.fraction)
                     }
                     is ClientMessage.Bye -> {
                         send(session, ServerMessage.Bye)
