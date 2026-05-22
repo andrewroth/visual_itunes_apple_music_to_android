@@ -45,8 +45,8 @@ echo "Using CI run: $RUN_ID"
 # Commit the run was built from — used as the release target.
 RUN_SHA=$(gh run view "$RUN_ID" --repo "$REPO" --json headSha --jq .headSha)
 SHORT_SHA="${RUN_SHA:0:7}"
-TAG="v0.1.0-pre-$SHORT_SHA"
-TITLE="v0.1.0-pre ($SHORT_SHA)"
+TAG="v0.2.0-pre-$SHORT_SHA"
+TITLE="v0.2.0-pre ($SHORT_SHA)"
 echo "Target commit: $RUN_SHA  tag: $TAG"
 
 # Bail if a release already exists for this commit so we don't clobber it.
@@ -94,7 +94,7 @@ LIN_RPM=$(find_one "linux rpm"          "$TMP/musicsync-linux" -name '*.rpm' -ty
 
 # Rename the APK to a friendlier user-facing filename without touching
 # the original (cp into the tmp dir so cleanup is automatic).
-ANDROID_APK="$TMP/Viamta-Music-Sync-0.1.0-android.apk"
+ANDROID_APK="$TMP/Viamta-Music-Sync-0.2.0-android.apk"
 cp "$ANDROID_SRC" "$ANDROID_APK"
 
 # --- Push the tag -----------------------------------------------------------

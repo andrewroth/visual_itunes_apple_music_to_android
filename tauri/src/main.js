@@ -6,7 +6,7 @@
 
 // Build-version tag. Bump when debugging so you can tell at a glance which
 // version is actually running (caches, stale loads, etc.).
-const MUSICSYNC_BUILD = "0.1.0-dev-debug-2026-05-21-2";
+const MUSICSYNC_BUILD = "0.2.0-pre-2026-05-22";
 console.log("MusicSync frontend loaded:", MUSICSYNC_BUILD);
 
 import { invoke } from "https://cdn.jsdelivr.net/npm/@tauri-apps/api@2/core/+esm";
