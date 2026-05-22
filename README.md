@@ -1,25 +1,17 @@
 # Viamta Music Sync
 
-**V**isual **i**Tunes/**A**pple **M**usic **t**o **A**ndroid — sync your Apple
-Music library to an Android phone over Wi-Fi.
+Visual iTunes/Apple Music to Android
 
-Two pieces:
+Visually select playlists to sync to a device.
 
-- **Desktop app** (`tauri/`) — reads your `Library.xml`, lets you pick which
-  playlists to sync.
-- **Android companion** (`android/`) — runs a WebSocket server on your LAN
-  that the desktop pushes files and playlists to.
+Desktop app available for Mac / Windows / Linux.
 
-The desktop auto-discovers the phone via mDNS; pairing is a one-time
-six-digit comparison.
+Desktop connects to an Android companion app for fast transfer.
 
-## Install
+## Get it
 
-Grab the latest pre-release from the [Releases page](../../releases) —
-installers for Windows/macOS/Linux and an APK for Android.
+[Latest release →](../../releases)
 
-## Build from source
+## Build
 
-- Desktop: see `tauri/README.md`
-- Android: see `android/README.md`
-- Wire protocol: `PROTOCOL.md`
+`tauri/` (desktop) · `android/` (companion) · `PROTOCOL.md` (wire format)
