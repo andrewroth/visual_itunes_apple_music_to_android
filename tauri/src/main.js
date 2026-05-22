@@ -1113,6 +1113,23 @@ window.addEventListener("DOMContentLoaded", async () => {
   // (The old #delete_unused_songs checkbox lived in a separate panel
   // that's been replaced by the in-table orphan row. Handler attached
   // inline in renderPlaylists() now.)
+
+  // Verbose-logging checkbox in the About tab.
+  const vlog = $("verbose_logging");
+  if (vlog) {
+    vlog.checked = !!lastSettings.verbose_logging;
+    vlog.addEventListener("change", async (e) => {
+      await invoke("set_verbose_logging", { value: e.target.checked });
+      lastSettings.verbose_logging = e.target.checked;
+      appendLog(
+        e.target.checked
+          ? "Verbose logging ON — per-track matching detail will appear here and in musicsync-YYYY-MM-DD.log"
+          : "Verbose logging OFF"
+      );
+    });
+  }
+  // Backend-pushed log lines (verbose tracing dumps).
+  listen("log_line", (e) => appendLog(e.payload));
   const msg1 = `MusicSync frontend ${MUSICSYNC_BUILD} ready`;
   console.log(msg1);
   appendLog(msg1);

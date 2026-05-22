@@ -412,8 +412,26 @@
         </p>
         <p>
           GPL-3.0. Source:
-          <code>github.com/andrewroth/ruby_itunes_apple_music_to_android</code>
+          <code>github.com/andrewroth/visual_itunes_apple_music_to_android</code>
         </p>
+        <hr/>
+        <h6>Debugging</h6>
+        <div class="form-check">
+          <input
+            type="checkbox"
+            class="form-check-input"
+            id="verbose_logging"
+          />
+          <label class="form-check-label" for="verbose_logging">
+            Extra verbose debugging logs
+          </label>
+          <div class="text-muted small">
+            Writes per-track matching details into the Log tab AND a dated
+            file <code>musicsync-YYYY-MM-DD.log</code> in the working
+            directory. Useful for "this file is on the phone but it's
+            still trying to upload it" type issues.
+          </div>
+        </div>
       </div>
     </div>
 

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use musicsync_core::library::Library;
 use musicsync_core::settings::{PlaylistAction, RememberedPlaylist, Settings};
+use std::io::Write as _;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
@@ -791,6 +792,7 @@ struct ScanResultEvent {
 #[tauri::command]
 async fn scan_device(
     ws_url: String,
+    app: AppHandle,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<ScanResultEvent, String> {
     use musicsync_core::matching::{mark_on_device_loose, DeviceFile};
@@ -848,7 +850,75 @@ async fn scan_device(
         .iter()
         .map(|(p, s)| DeviceFile { path: p.clone(), size: *s })
         .collect();
+
+    // Verbose dump BEFORE matching so the log has a full picture of
+    // what's on the phone vs what iTunes knows about. The user can grep
+    // for a specific filename and see both sides.
+    let verbose = {
+        let guard = state.lock().unwrap();
+        guard.settings.verbose_logging
+    };
+    if verbose {
+        vlog(&app, true, format!(
+            "=== scan_device start: {} iTunes tracks, {} device files",
+            tracks_clone.len(), device_files.len(),
+        ));
+        // Histogram of device-file sizes to spot duplicates.
+        let mut size_counts: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::new();
+        for (_, sz) in &device_files {
+            *size_counts.entry(*sz).or_insert(0) += 1;
+        }
+        vlog(&app, true, format!(
+            "device file size distribution: {} unique sizes, {} duplicates",
+            size_counts.len(),
+            size_counts.values().filter(|&&v| v > 1).count(),
+        ));
+        // Dump first 20 device files so you can sanity-check sizes.
+        for (i, (p, sz)) in device_files.iter().take(20).enumerate() {
+            vlog(&app, true, format!("  device[{i}] size={sz} path={p:?}"));
+        }
+    }
     mark_on_device_loose(&mut tracks_clone, &dfs);
+
+    if verbose {
+        // Per-track outcome. Sample heavily for big libraries so we
+        // don't blow up the log file; show every UNMATCHED track.
+        let device_sizes: std::collections::HashSet<u64> =
+            device_files.iter().map(|(_, s)| *s).collect();
+        let mut matched = 0usize;
+        let mut unmatched = 0usize;
+        let mut shown_matched = 0usize;
+        for t in tracks_clone.values() {
+            if t.on_device {
+                matched += 1;
+                if shown_matched < 20 {
+                    vlog(&app, true, format!(
+                        "MATCHED  track id={} size={} name={:?} -> some device file with size {}",
+                        t.id, t.size, t.name, t.size,
+                    ));
+                    shown_matched += 1;
+                }
+            } else {
+                unmatched += 1;
+                let nearby: Vec<u64> = device_sizes
+                    .iter()
+                    .filter(|s| (**s as i64 - t.size as i64).abs() < 1024)
+                    .copied()
+                    .take(5)
+                    .collect();
+                vlog(&app, true, format!(
+                    "MISSING  track id={} size={} name={:?} local={:?} \
+                     | nearby device sizes (±1KB): {:?}",
+                    t.id, t.size, t.name, t.local_path, nearby,
+                ));
+            }
+        }
+        vlog(&app, true, format!(
+            "=== matching summary: {} matched, {} unmatched (out of {})",
+            matched, unmatched, tracks_clone.len(),
+        ));
+    }
 
     let library_sizes: HashSet<u64> = tracks_clone.values().map(|t| t.size).collect();
     let mut unused_paths: Vec<String> = Vec::new();
@@ -890,6 +960,71 @@ async fn scan_device(
     }
 
     Ok(result)
+}
+
+/// Write a verbose-debug line to both the Log tab (via the `log_line`
+/// event) and a dated file `musicsync-YYYY-MM-DD.log` in the working
+/// directory. No-op when `verbose_logging` is off.
+fn vlog(app: &AppHandle, verbose: bool, line: impl AsRef<str>) {
+    if !verbose { return; }
+    let s = line.as_ref();
+    tracing::info!("[vlog] {s}");
+    // Emit to frontend Log tab.
+    let _ = app.emit("log_line", s.to_string());
+    // Append to dated file. Best-effort; never panic if disk is full.
+    let date = chrono_today_yyyy_mm_dd();
+    let path = format!("musicsync-{date}.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&path) {
+        let _ = writeln!(f, "{} {}", chrono_now_hms(), s);
+    }
+}
+
+fn chrono_today_yyyy_mm_dd() -> String {
+    // Lightweight YYYY-MM-DD without pulling in chrono just for this.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs / 86_400;
+    let (y, m, d) = days_to_ymd(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+fn chrono_now_hms() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let s = (secs % 86_400) as u32;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+}
+
+/// Civil date from Unix epoch days. Algorithm from Howard Hinnant's
+/// "date" library; produces (year, month, day).
+fn days_to_ymd(days: i64) -> (i32, u32, u32) {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i32 + era as i32 * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (y + if m <= 2 { 1 } else { 0 }, m, d)
+}
+
+#[tauri::command]
+fn set_verbose_logging(
+    value: bool,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<(), String> {
+    let mut guard = state.lock().unwrap();
+    guard.settings.verbose_logging = value;
+    let path = guard.settings_path.clone();
+    let to_save = guard.settings.clone();
+    drop(guard);
+    to_save.save(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1474,6 +1609,7 @@ fn main() {
             set_playlist_action,
             scan_device,
             set_delete_unused_songs,
+            set_verbose_logging,
             toggle_cleanup_playlist,
             forget_pairing,
             add_ignored_device,

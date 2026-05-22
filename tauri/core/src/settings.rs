@@ -84,6 +84,13 @@ pub struct Settings {
     #[serde(rename = "cleanup_playlist_ids", default)]
     pub cleanup_playlist_ids: Vec<String>,
 
+    /// When true, the backend emits very detailed per-track matching
+    /// logs to both the Log tab AND a dated file in the working dir
+    /// (`musicsync-YYYY-MM-DD.log`). Useful for diagnosing "this file
+    /// is on the phone but it's still trying to upload it" issues.
+    #[serde(rename = "verbose_logging", default)]
+    pub verbose_logging: bool,
+
     /// Device names ("Pixel 7", "Galaxy S24") the user has explicitly
     /// rejected during pairing. mDNS hits matching any of these are
     /// silently skipped on discovery. Cleared only by the user via the
