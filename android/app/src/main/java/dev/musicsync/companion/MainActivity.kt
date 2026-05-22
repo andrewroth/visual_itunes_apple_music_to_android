@@ -154,49 +154,65 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                 ) { padding ->
+                    // Two-tab layout: "Main" (status, pairing, address)
+                    // and "Log" (event stream). Header (TopAppBar above)
+                    // and Quit (below) stay pinned in both views so the
+                    // user always sees who they are and can always quit.
+                    var selectedTab by rememberSaveable { mutableStateOf(0) }
+                    val tabTitles = listOf("Main", "Log")
                     Column(
-                        modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.padding(padding).fillMaxSize(),
                     ) {
-                        ServerStatusChip(
-                            running = runningState.value,
-                            connectedClients = connectedClientsState.value,
-                            searchActive = searchActiveState.value,
-                            onResumeSearch = { service?.resumeSearch() },
-                        )
-                        DeviceNameRow(
-                            name = deviceNameState.value,
-                            onRename = { service?.renameDevice(it) },
-                        )
-                        MusicRootRow(
-                            path = musicRootState.value,
-                            onChange = { uri, flags -> service?.setMusicRoot(uri, flags) },
-                            disabled = syncActiveState.value,
-                        )
-                        if (syncActiveState.value) {
-                            SyncProgressBanner(progress = syncProgressState.value)
-                            StopSyncButton(onStop = {
-                                service?.stopSync("stopped by user on phone")
-                            })
+                        TabRow(selectedTabIndex = selectedTab) {
+                            tabTitles.forEachIndexed { index, title ->
+                                Tab(
+                                    selected = selectedTab == index,
+                                    onClick = { selectedTab = index },
+                                    text = { Text(title) },
+                                )
+                            }
                         }
-                        PairedBanner(
-                            hasPairing = hasPairingState.value,
-                            count = pairedListState.value.size,
-                            paired = pairedListState.value,
-                            onForgetOne = { token -> service?.forgetPairing(token) },
-                            onForgetAll = { service?.forgetAllPairings() },
-                        )
-                        ScanBanner(state = scanState.value)
-                        // While a desktop is connected, the LAN address
-                        // card is just noise — hide it.
-                        if (connectedClientsState.value.isEmpty()) {
-                            AddressCard(ip = currentLanIp())
+                        // Tab body fills the remaining space above the
+                        // Quit button. Both tabs use the same horizontal
+                        // padding as before.
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            when (selectedTab) {
+                                0 -> MainTabContent(
+                                    runningState = runningState.value,
+                                    connectedClients = connectedClientsState.value,
+                                    searchActive = searchActiveState.value,
+                                    onResumeSearch = { service?.resumeSearch() },
+                                    deviceName = deviceNameState.value,
+                                    onRename = { service?.renameDevice(it) },
+                                    musicRoot = musicRootState.value,
+                                    onMusicRootChange = { uri, flags ->
+                                        service?.setMusicRoot(uri, flags)
+                                    },
+                                    syncActive = syncActiveState.value,
+                                    syncProgress = syncProgressState.value,
+                                    onStopSync = {
+                                        service?.stopSync("stopped by user on phone")
+                                    },
+                                    hasPairing = hasPairingState.value,
+                                    paired = pairedListState.value,
+                                    onForgetOne = { token ->
+                                        service?.forgetPairing(token)
+                                    },
+                                    onForgetAll = { service?.forgetAllPairings() },
+                                    scan = scanState.value,
+                                    lanIp = currentLanIp(),
+                                )
+                                1 -> LogCard(events = logState.value)
+                            }
                         }
-                        LogCard(events = logState.value)
-                        // Quit lives at the very bottom of the page, below
-                        // the log card. Users scroll down past everything
-                        // else to reach it, so it can't be hit accidentally.
                         QuitAppButton(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                             transferActive = syncActiveState.value,
                             onQuit = {
                                 service?.stopServer()
@@ -760,12 +776,13 @@ private fun StopSyncButton(onStop: () -> Unit) {
 private fun QuitAppButton(
     transferActive: Boolean,
     onQuit: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var confirm by rememberSaveable { mutableStateOf(false) }
     OutlinedButton(
         onClick = { confirm = true },
         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB00020)),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
     ) {
         Text("Quit app")
     }
@@ -897,6 +914,61 @@ private fun AddressCard(ip: String?) {
                 color = GreyFg,
             )
         }
+    }
+}
+
+/**
+ * Body of the "Main" tab. Just a rendering of the existing top-of-page
+ * widgets in the same order, broken out so the tab switcher in
+ * [MainActivity] stays compact.
+ */
+@Composable
+private fun ColumnScope.MainTabContent(
+    runningState: Boolean,
+    connectedClients: List<String>,
+    searchActive: Boolean,
+    onResumeSearch: () -> Unit,
+    deviceName: String,
+    onRename: (String) -> Unit,
+    musicRoot: String,
+    onMusicRootChange: (android.net.Uri, Int) -> String?,
+    syncActive: Boolean,
+    syncProgress: SyncService.SyncProgress?,
+    onStopSync: () -> Unit,
+    hasPairing: Boolean,
+    paired: List<PairedDesktop>,
+    onForgetOne: (String) -> Unit,
+    onForgetAll: () -> Unit,
+    scan: SyncService.ScanState,
+    lanIp: String?,
+) {
+    ServerStatusChip(
+        running = runningState,
+        connectedClients = connectedClients,
+        searchActive = searchActive,
+        onResumeSearch = onResumeSearch,
+    )
+    DeviceNameRow(name = deviceName, onRename = onRename)
+    MusicRootRow(
+        path = musicRoot,
+        onChange = onMusicRootChange,
+        disabled = syncActive,
+    )
+    if (syncActive) {
+        SyncProgressBanner(progress = syncProgress)
+        StopSyncButton(onStop = onStopSync)
+    }
+    PairedBanner(
+        hasPairing = hasPairing,
+        count = paired.size,
+        paired = paired,
+        onForgetOne = onForgetOne,
+        onForgetAll = onForgetAll,
+    )
+    ScanBanner(state = scan)
+    // While a desktop is connected, the LAN address card is just noise.
+    if (connectedClients.isEmpty()) {
+        AddressCard(ip = lanIp)
     }
 }
 
