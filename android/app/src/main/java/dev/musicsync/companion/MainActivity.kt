@@ -14,6 +14,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -154,65 +156,78 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                 ) { padding ->
-                    // Two-tab layout: "Main" (status, pairing, address)
                     // "Connection" (status / device-name / pairings /
                     // LAN address), "Transfer" (music folder / inventory
                     // / sync progress), and "Log" (event stream). Header
                     // (TopAppBar above) and Quit (below) stay pinned in
                     // all tabs.
-                    var selectedTab by rememberSaveable { mutableStateOf(0) }
+                    //
+                    // HorizontalPager is the source of truth for the
+                    // selected tab so the user can swipe-left/right
+                    // between them. The TabRow mirrors the pager state
+                    // and tapping a tab animates the pager.
                     val tabTitles = listOf("Connection", "Transfer", "Log")
+                    val pagerState = rememberPagerState(
+                        initialPage = 0,
+                        pageCount = { tabTitles.size },
+                    )
+                    val coroutineScope = rememberCoroutineScope()
                     Column(
                         modifier = Modifier.padding(padding).fillMaxSize(),
                     ) {
-                        TabRow(selectedTabIndex = selectedTab) {
+                        TabRow(selectedTabIndex = pagerState.currentPage) {
                             tabTitles.forEachIndexed { index, title ->
                                 Tab(
-                                    selected = selectedTab == index,
-                                    onClick = { selectedTab = index },
+                                    selected = pagerState.currentPage == index,
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            pagerState.animateScrollToPage(index)
+                                        }
+                                    },
                                     text = { Text(title) },
                                 )
                             }
                         }
-                        // Tab body fills the remaining space above the
-                        // Quit button. Both tabs use the same horizontal
-                        // padding as before.
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(16.dp)
-                                .fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            when (selectedTab) {
-                                0 -> ConnectionTabContent(
-                                    runningState = runningState.value,
-                                    connectedClients = connectedClientsState.value,
-                                    searchActive = searchActiveState.value,
-                                    onResumeSearch = { service?.resumeSearch() },
-                                    deviceName = deviceNameState.value,
-                                    onRename = { service?.renameDevice(it) },
-                                    hasPairing = hasPairingState.value,
-                                    paired = pairedListState.value,
-                                    onForgetOne = { token ->
-                                        service?.forgetPairing(token)
-                                    },
-                                    onForgetAll = { service?.forgetAllPairings() },
-                                    lanIp = currentLanIp(),
-                                )
-                                1 -> TransferTabContent(
-                                    musicRoot = musicRootState.value,
-                                    onMusicRootChange = { uri, flags ->
-                                        service?.setMusicRoot(uri, flags)
-                                    },
-                                    syncActive = syncActiveState.value,
-                                    syncProgress = syncProgressState.value,
-                                    onStopSync = {
-                                        service?.stopSync("stopped by user on phone")
-                                    },
-                                    scan = scanState.value,
-                                )
-                                2 -> LogCard(events = logState.value)
+                        HorizontalPager(
+                            state = pagerState,
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                        ) { page ->
+                            Column(
+                                modifier = Modifier
+                                    .padding(16.dp)
+                                    .fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                when (page) {
+                                    0 -> ConnectionTabContent(
+                                        runningState = runningState.value,
+                                        connectedClients = connectedClientsState.value,
+                                        searchActive = searchActiveState.value,
+                                        onResumeSearch = { service?.resumeSearch() },
+                                        deviceName = deviceNameState.value,
+                                        onRename = { service?.renameDevice(it) },
+                                        hasPairing = hasPairingState.value,
+                                        paired = pairedListState.value,
+                                        onForgetOne = { token ->
+                                            service?.forgetPairing(token)
+                                        },
+                                        onForgetAll = { service?.forgetAllPairings() },
+                                        lanIp = currentLanIp(),
+                                    )
+                                    1 -> TransferTabContent(
+                                        musicRoot = musicRootState.value,
+                                        onMusicRootChange = { uri, flags ->
+                                            service?.setMusicRoot(uri, flags)
+                                        },
+                                        syncActive = syncActiveState.value,
+                                        syncProgress = syncProgressState.value,
+                                        onStopSync = {
+                                            service?.stopSync("stopped by user on phone")
+                                        },
+                                        scan = scanState.value,
+                                    )
+                                    2 -> LogCard(events = logState.value)
+                                }
                             }
                         }
                         QuitAppButton(

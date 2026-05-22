@@ -18,6 +18,56 @@ async function openDialog(options) {
   return await invoke("plugin:dialog|open", { options });
 }
 
+// In-app Bootstrap-modal confirm. Tauri 2.x's window.confirm polyfill
+// dispatches a `dialog.confirm` backend command that doesn't exist in
+// the plugin (only `ask` does), so window.confirm rejects with
+// "Command not found." Rolling our own avoids the plugin entirely and
+// guarantees a consistent UI across every prompt in the app.
+let _confirmModalInstance = null;
+function confirmDialog(message, options = {}) {
+  const title = options.title || "Confirm";
+  const okLabel = options.okLabel || "OK";
+  const cancelLabel = options.cancelLabel || "Cancel";
+  return new Promise((resolve) => {
+    const titleEl = $("confirm_modal_title");
+    const bodyEl = $("confirm_modal_body");
+    const okBtn = $("confirm_modal_ok");
+    const cancelBtn = $("confirm_modal_cancel");
+    if (!titleEl || !bodyEl || !okBtn || !cancelBtn) {
+      // Modal markup missing — degrade to letting the caller proceed.
+      console.error("confirm_modal markup missing; defaulting to true");
+      resolve(true);
+      return;
+    }
+    titleEl.textContent = title;
+    bodyEl.textContent = message;
+    okBtn.textContent = okLabel;
+    cancelBtn.textContent = cancelLabel;
+    if (!_confirmModalInstance) {
+      _confirmModalInstance = new bootstrap.Modal($("confirm_modal"));
+    }
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      okBtn.removeEventListener("click", onOk);
+      cancelBtn.removeEventListener("click", onCancel);
+      $("confirm_modal").removeEventListener("hidden.bs.modal", onHidden);
+      _confirmModalInstance.hide();
+      resolve(result);
+    };
+    const onOk = () => settle(true);
+    const onCancel = () => settle(false);
+    // Backdrop click or Escape key both fire hidden.bs.modal —
+    // treat as Cancel.
+    const onHidden = () => settle(false);
+    okBtn.addEventListener("click", onOk);
+    cancelBtn.addEventListener("click", onCancel);
+    $("confirm_modal").addEventListener("hidden.bs.modal", onHidden);
+    _confirmModalInstance.show();
+  });
+}
+
 const $ = (id) => document.getElementById(id);
 
 const SETTINGS_FIELDS = ["library_path", "ws_url", "ftp_path"];
@@ -74,6 +124,14 @@ function formatTime(ms) {
 // lines which arrive via the `log_line` event and are appended directly.
 function verboseLog(line) {
   if (!lastSettings.verbose_sync_logging) return;
+  appendLog(line);
+}
+
+// Connection-side verbose logger. Gated on the "Detailed connection
+// info" About-tab checkbox so heartbeat / discovery / connect-button
+// internals only appear when the user opted in.
+function verboseConnLog(line) {
+  if (!lastSettings.verbose_connection_logging) return;
   appendLog(line);
 }
 
@@ -206,7 +264,7 @@ function renderMissingPlaylists(library) {
       const id = btn.dataset.id;
       const row = btn.closest("tr");
       const name = row?.querySelector("td:first-child")?.textContent || id;
-      const ok = window.confirm(
+      const ok = await confirmDialog(
         `Forget "${name}"?\n\n` +
         `This removes the playlist from Viamta Music Sync's remembered list. ` +
         `If a playlist with the same ID later reappears in your Library.xml, ` +
@@ -639,6 +697,26 @@ async function scanDevice() {
 // run_sync. The Stop button is only useful (and only visible) in between.
 // Reset the "Aborting…" pending state on every fresh sync so it doesn't
 // stick around if the user starts a new sync after a prior abort.
+// Disable / re-enable the Manually-connect and Scan buttons. While a
+// sync is running we don't want a stray click to tear down the WS in
+// the middle of a transfer; the data-disabled-title attribute (set in
+// index.html) surfaces the reason on hover instead of just looking
+// inert.
+function setAddrButtonsDisabled(disabled) {
+  for (const id of ["ws_url_edit", "ws_url_scan"]) {
+    const btn = $(id);
+    if (!btn) continue;
+    if (disabled) {
+      btn.setAttribute("disabled", "true");
+      const tip = btn.getAttribute("data-disabled-title");
+      if (tip) btn.setAttribute("title", tip);
+    } else {
+      btn.removeAttribute("disabled");
+      btn.removeAttribute("title");
+    }
+  }
+}
+
 listen("sync_started", () => {
   $("sync").style.display = "none";
   const stop = $("stop_sync");
@@ -651,6 +729,7 @@ listen("sync_started", () => {
   // green dot in case the heartbeat got out of sync (e.g. a brief
   // network blip dropped the presence WS while the sync WS recovered).
   markDeviceAlive();
+  setAddrButtonsDisabled(true);
 });
 listen("sync_ended", () => {
   const stop = $("stop_sync");
@@ -659,6 +738,7 @@ listen("sync_ended", () => {
   stop.textContent = "Stop sync";
   $("sync").style.display = "";
   hideEta();
+  setAddrButtonsDisabled(false);
 });
 
 // ----- ETA -----
@@ -725,7 +805,7 @@ function updateEta(fraction) {
 }
 
 async function stopSync() {
-  const ok = window.confirm(
+  const ok = await confirmDialog(
     "Stop sync now?\n\n" +
     "Files already copied stay on the phone. The next sync will check " +
     "what's still missing and pick up where this one left off."
@@ -869,10 +949,10 @@ function openManagePairings() {
     x.textContent = "✕";
     x.title = "Forget this pairing";
     x.addEventListener("click", async () => {
-      if (!window.confirm(
+      if (!(await confirmDialog(
         `Forget pairing with ${lastSettings.paired_device_name}?\n\n` +
         "You'll need to pair again next time you want to sync to this phone."
-      )) return;
+      ))) return;
       await forgetPairing();
       if (managePairingsModal) managePairingsModal.hide();
     });
@@ -981,24 +1061,31 @@ function startScanCycle() {
   }, 30_000);
 }
 
+// Single source of truth for "is the address banner currently showing
+// a green-dot connected device?" Used to gate the disconnect-confirm
+// dialog on the Manually-connect and Scan buttons. Set by the two
+// paths that render a green dot; cleared by every other banner
+// state (searching, none-found, manual entry, yellow stale dot).
+let _showingGreenDot = false;
+
 function showSearchingState() {
+  _showingGreenDot = false;
   $("ws_url_display").style.display = "";
   $("ws_url_display").innerHTML =
-    `<span class="spinner-border spinner-border-sm me-1"></span> ` +
-    `Scanning for Viamta Music Sync App`;
+    `<span class="spinner-border spinner-border-sm me-1 text-danger"></span> ` +
+    `<em class="text-danger">Scanning for Viamta Music Sync App</em>`;
   $("ws_url").style.display = "none";
-  $("ws_url_edit").textContent = "Enter manually";
   renderForgetPairingBtn();
   startScanCycle();
 }
 
 function showNoneFoundState() {
+  _showingGreenDot = false;
   $("ws_url_display").style.display = "";
   $("ws_url_display").innerHTML =
     `<span class="text-muted">No Viamta Music Sync Apps Found.</span> ` +
     `<button type="button" id="rescan_btn" class="btn btn-sm btn-link p-0 ms-1">Rescan</button>`;
   $("ws_url").style.display = "none";
-  $("ws_url_edit").textContent = "Enter manually";
   $("rescan_btn")?.addEventListener("click", () => {
     appendLog("Manual rescan");
     showSearchingState();
@@ -1034,6 +1121,7 @@ function tryRememberedManual() {
 // Re-render just the colored ● indicator + device label without
 // touching anything else. Called by the alive/yellow listeners.
 function renderFoundDot(colorClass /* "success" | "warning" */) {
+  _showingGreenDot = (colorClass === "success");
   const deviceName = window._foundDeviceName || "";
   const wsUrl = window._wsUrl || "";
   $("ws_url_display").innerHTML =
@@ -1043,6 +1131,7 @@ function renderFoundDot(colorClass /* "success" | "warning" */) {
 }
 
 function showFoundState(deviceName, wsUrl) {
+  _showingGreenDot = true;
   $("ws_url").value = wsUrl;
   $("ws_url_display").style.display = "";
   $("ws_url_display").innerHTML =
@@ -1050,10 +1139,6 @@ function showFoundState(deviceName, wsUrl) {
     `<strong>${escapeHtml(deviceName)}</strong> ` +
     `<span class="text-muted small">${escapeHtml(wsUrl)}</span>`;
   $("ws_url").style.display = "none";
-  // With an address in hand, the right-side button switches from "Enter
-  // manually" to "Scan" — clicking it abandons the current address and
-  // re-enters the searching state.
-  $("ws_url_edit").textContent = "Scan";
   window._wsUrl = wsUrl;
   window._foundDeviceName = deviceName;
   stopScanCycle();
@@ -1079,6 +1164,7 @@ const LS_MANUAL_PORT = "musicsync.lastManualPort";
 // manually button is hidden and Save/Cancel take its place; Forget
 // pairing also hides because it's unrelated to typing.
 function showManualState() {
+  _showingGreenDot = false;
   $("ws_url_display").style.display = "none";
   $("ws_url_proto").style.display = "";
   $("ws_url_ip").style.display = "";
@@ -1093,6 +1179,7 @@ function showManualState() {
   if (!$("ws_url_ip").value) $("ws_url_ip").value = rememberedIp;
   if (!$("ws_url_port").value) $("ws_url_port").value = rememberedPort;
   $("ws_url_edit").style.display = "none";
+  $("ws_url_scan").style.display = "none";
   $("ws_url_save").style.display = "";
   $("ws_url_cancel").style.display = "";
   $("forget_pairing_btn").style.display = "none";
@@ -1113,6 +1200,7 @@ function exitManualState() {
   $("ws_url_save").style.display = "none";
   $("ws_url_cancel").style.display = "none";
   $("ws_url_edit").style.display = "";
+  $("ws_url_scan").style.display = "";
   $("ws_url_display").style.display = "";
   renderForgetPairingBtn();
 }
@@ -1233,7 +1321,7 @@ async function promptForRePair(deviceName, wsUrl) {
   try {
     const name = deviceName || window._foundDeviceName || lastSettings.paired_device_name || "(unknown)";
     const url = wsUrl || window._wsUrl || "(unknown address)";
-    const ok = window.confirm(`Found a Viamta Music Sync App. Approve?\n\n${name} (${url})`);
+    const ok = await confirmDialog(`Found a Viamta Music Sync App. Approve?\n\n${name} (${url})`);
     if (ok) {
       await forgetPairing();
       appendLog("Re-pairing — waiting for next discovery hit…");
@@ -1349,28 +1437,71 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Single button, two modes: "Enter manually" (in searching/none-found
   // state) opens the type-an-address input; "Scan" (in found state)
   // disconnects + falls back to searching. Branch on current label.
-  $("ws_url_edit").addEventListener("click", async () => {
-    if ($("ws_url_edit").textContent.trim() === "Scan") {
-      // The button only displays "Scan" while a device is selected
-      // (found state). Confirm regardless of the heartbeat flag — the
-      // JS state can briefly disagree with the actual server side,
-      // and there's no harm in confirming.
-      const ok = window.confirm(
-        "This will break the current connection and scan for Viamta Music Sync Apps. Continue?"
-      );
-      if (!ok) return;
-      // Disconnect the persistent presence WS and drop back to search.
-      try { await invoke("stop_heartbeat"); } catch (_) { /* fine */ }
-      _heartbeatAlive = false;
-      _triedDevices.clear();
+  // Helper: if we currently believe we have a phone connection,
+  // warn + tear it down before letting the caller take its next step.
+  // Returns true if the user proceeded (or there was nothing to drop),
+  // false if they cancelled the warning.
+  // Confirm-then-disconnect, but ONLY when a green-dot connection is
+  // currently being shown in the address banner. Anything else
+  // (searching spinner, "No apps found", yellow stale-pong dot)
+  // proceeds without asking. Gated on the dedicated _showingGreenDot
+  // flag that the banner-state functions maintain — single source of
+  // truth, doesn't drift from what the user sees.
+  async function maybeDisconnect(verbForConfirm) {
+    verboseConnLog(`maybeDisconnect: _showingGreenDot=${_showingGreenDot}`);
+    if (!_showingGreenDot) {
+      // No connection shown — just clear any residual state and
+      // let the caller proceed.
       window._wsUrl = "";
       window._foundDeviceName = "";
-      setSyncEnabled(false);
-      showSearchingState();
-      appendLog("Disconnected — scanning for Viamta Music Sync Apps");
-    } else {
-      showManualState();
+      _triedDevices.clear();
+      return true;
     }
+    const name = window._foundDeviceName || "the current phone";
+    // Tauri 2.x overrides window.confirm to return a Promise<boolean>
+    // rather than the web-standard synchronous boolean. Without await
+    // we'd compare a Promise object (always truthy) and proceed as if
+    // confirmed.
+    const ok = await confirmDialog(
+      `This will disconnect from ${name} and ${verbForConfirm}. Continue?`
+    );
+    if (!ok) return false;
+    try { await invoke("stop_heartbeat"); } catch (_) { /* fine */ }
+    _heartbeatAlive = false;
+    _showingGreenDot = false;
+    _triedDevices.clear();
+    window._wsUrl = "";
+    window._foundDeviceName = "";
+    setSyncEnabled(false);
+    return true;
+  }
+
+  // Manually connect: always visible. Disconnects (with warning) and
+  // opens the IP/port entry form.
+  // Helper: bind once per element. Tauri's dev webview can fire
+  // DOMContentLoaded twice on hot reloads, which would otherwise stack
+  // duplicate handlers (single click → two confirm dialogs, two
+  // log lines, etc.).
+  function bindClickOnce(id, handler) {
+    const el = $(id);
+    if (!el) return;
+    if (el.dataset.clickWired === "1") return;
+    el.dataset.clickWired = "1";
+    el.addEventListener("click", handler);
+  }
+  bindClickOnce("ws_url_edit", async () => {
+    verboseConnLog("CLICK ws_url_edit (Manually connect)");
+    if (!(await maybeDisconnect("enter a manual address"))) return;
+    showManualState();
+  });
+  // Scan: always visible. Disconnects (with warning) and re-enters
+  // the searching state, where mDNS / sweep / manual fallback all
+  // kick off in parallel.
+  bindClickOnce("ws_url_scan", async () => {
+    verboseConnLog("CLICK ws_url_scan (Scan)");
+    if (!(await maybeDisconnect("scan for Viamta Music Sync Apps"))) return;
+    appendLog("Disconnected — scanning for Viamta Music Sync Apps");
+    showSearchingState();
   });
   $("ws_url_save").addEventListener("click", saveManualUrl);
   $("ws_url_cancel").addEventListener("click", cancelManualUrl);

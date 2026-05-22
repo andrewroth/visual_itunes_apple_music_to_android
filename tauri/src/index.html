@@ -168,8 +168,18 @@
                   id="ws_url_edit"
                   class="btn border bg-white text-dark"
                   style="white-space: nowrap"
+                  data-disabled-title="Abort the current transfer first"
                 >
-                  Enter manually
+                  Manually connect
+                </button>
+                <button
+                  type="button"
+                  id="ws_url_scan"
+                  class="btn border bg-white text-dark"
+                  style="white-space: nowrap"
+                  data-disabled-title="Abort the current transfer first"
+                >
+                  Scan
                 </button>
                 <button
                   type="button"
@@ -503,6 +513,24 @@
         ></div>
       </div>
       <small id="progress_eta" class="text-muted" style="display: none; min-width: 8em; text-align: right; font-variant-numeric: tabular-nums"></small>
+    </div>
+
+    <!-- Generic confirm modal. confirmDialog() in main.js fills the
+         body, swaps the OK/Cancel labels, and resolves a Promise to
+         the user's choice. Bootstrap drives the show/hide. -->
+    <div class="modal fade" id="confirm_modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="confirm_modal_title">Confirm</h5>
+          </div>
+          <div class="modal-body" id="confirm_modal_body" style="white-space: pre-line"></div>
+          <div class="modal-footer">
+            <button type="button" id="confirm_modal_cancel" class="btn btn-secondary">Cancel</button>
+            <button type="button" id="confirm_modal_ok" class="btn btn-primary">OK</button>
+          </div>
+        </div>
+      </div>
     </div>
   </body>
 </html>
