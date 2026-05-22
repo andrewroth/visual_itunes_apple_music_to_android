@@ -89,3 +89,40 @@ jobs:
             tauri/target/release/bundle/**/*
             tauri/target/*/release/bundle/**/*
           if-no-files-found: warn
+
+  android:
+    name: android-apk
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: setup android sdk
+        uses: android-actions/setup-android@v3
+
+      - name: setup gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: ensure gradlew is executable
+        run: chmod +x android/gradlew
+
+      - name: run android unit tests
+        working-directory: android
+        run: ./gradlew test
+
+      - name: build debug apk
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: upload android apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: musicsync-android-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
