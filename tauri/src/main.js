@@ -1190,17 +1190,29 @@ window.addEventListener("DOMContentLoaded", async () => {
       );
     });
   }
-  // "working directory" link in the verbose-logging blurb — opens the
-  // log directory in the OS file browser (Finder / Explorer / xdg-open).
-  const revealBtn = $("reveal_working_dir");
-  if (revealBtn) {
-    revealBtn.addEventListener("click", async (e) => {
+  // "Click here to export to a file" — dumps the in-memory Log tab
+  // contents to a user-chosen file via a native save dialog.
+  const exportBtn = $("export_log");
+  if (exportBtn) {
+    exportBtn.addEventListener("click", async (e) => {
       e.preventDefault();
       try {
-        const path = await invoke("reveal_working_dir");
-        appendLog(`Opened working directory: ${path}`);
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const path = await invoke("plugin:dialog|save", {
+          options: {
+            defaultPath: `musicsync-log-${stamp}.txt`,
+            filters: [
+              { name: "Text", extensions: ["txt", "log"] },
+              { name: "All files", extensions: ["*"] },
+            ],
+          },
+        });
+        if (!path) return; // user cancelled
+        const contents = $("log").innerText;
+        await invoke("write_text_file", { path, contents });
+        appendLog(`Log exported to ${path}`);
       } catch (err) {
-        appendLog(`Could not open working directory: ${err}`);
+        appendLog(`Export failed: ${err}`);
       }
     });
   }

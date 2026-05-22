@@ -204,9 +204,23 @@ fn load_library(app: AppHandle, state: State<Mutex<AppState>>) -> Result<Library
         .unwrap_or_else(|| "/sdcard/Music/".into());
 
     let lib_path = std::path::PathBuf::from(&library_path);
-    let lib = Library::parse_file(&lib_path, &device_root, &guard.settings)
+    let mut lib = Library::parse_file(&lib_path, &device_root, &guard.settings)
         .map_err(|e| e.to_string())?;
     let verbose = guard.settings.verbose_logging;
+
+    // Re-apply the most recent device scan so on_device flags survive a
+    // library reload. Without this, anything that triggers load_library
+    // after scan_device (e.g. the post-scan refresh in main.js) wipes the
+    // match results and the UI reports every track as needing to copy.
+    if let Some(scan) = guard.last_scan.as_ref() {
+        use musicsync_core::matching::{mark_on_device_strict, DeviceFile};
+        let dfs: Vec<DeviceFile> = scan
+            .device_files
+            .iter()
+            .map(|(p, s)| DeviceFile { path: p.clone(), size: *s })
+            .collect();
+        mark_on_device_strict(&mut lib.tracks, &dfs);
+    }
 
     // Read mtime so the UI can show when the Library.xml was last exported.
     let mtime_ms = std::fs::metadata(&lib_path)
@@ -1617,6 +1631,44 @@ fn handle_device_renamed(app: &AppHandle, device_id: String, device_name: String
     );
 }
 
+/// If a `legacy_settings.yml` is sitting in the working directory on
+/// startup, merge its `checked_playlist_ids` into `settings` and rename
+/// it to `legacy_settings.yml.imported` so subsequent launches don't
+/// reprocess it. Other fields in the legacy file (pairing token, library
+/// path, etc.) are deliberately ignored — only the playlist selections
+/// carry over. Best-effort: any I/O or parse error is logged but never
+/// fatal.
+fn maybe_import_legacy_settings_yml(settings: &mut Settings) {
+    let path = std::path::PathBuf::from("legacy_settings.yml");
+    if !path.exists() {
+        return;
+    }
+    let legacy = match Settings::load(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("legacy_settings.yml present but failed to parse: {e}");
+            return;
+        }
+    };
+    let existing: std::collections::HashSet<String> =
+        settings.checked_playlist_ids.iter().cloned().collect();
+    let mut imported = 0usize;
+    for id in legacy.checked_playlist_ids {
+        if !existing.contains(&id) {
+            settings.checked_playlist_ids.push(id);
+            imported += 1;
+        }
+    }
+    let dest = std::path::PathBuf::from("legacy_settings.yml.imported");
+    let rename_result = std::fs::rename(&path, &dest);
+    tracing::info!(
+        "legacy_settings.yml: imported {imported} new playlist id(s); \
+         rename to {} -> {:?}",
+        dest.display(),
+        rename_result,
+    );
+}
+
 /// Open the process working directory (where the dated `musicsync-*.log`
 /// files are written) in the OS file browser. Returned string is the
 /// absolute path so the frontend can surface it in a tooltip / error.
@@ -1635,6 +1687,13 @@ fn reveal_working_dir() -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("failed to open file browser: {e}"))?;
     Ok(path_str)
+}
+
+/// Write the given text to the chosen path. Used by the About-tab "export
+/// log" link to dump the in-memory Log tab contents to disk.
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1883,8 +1942,14 @@ fn main() {
         PathBuf::from("../settings.yml"),
         PathBuf::from("./settings.yml"),
     ];
-    let settings = Settings::load_with_migration(&settings_path, &legacy_paths)
+    let mut settings = Settings::load_with_migration(&settings_path, &legacy_paths)
         .unwrap_or_default();
+    // One-shot migration: if the user dropped a `legacy_settings.yml`
+    // in CWD (e.g. copied from an old Ruby install), merge its
+    // checked_playlist_ids and rename the file so we don't redo it.
+    maybe_import_legacy_settings_yml(&mut settings);
+    // Persist if the merge added anything (or did nothing — cheap).
+    let _ = settings.save(&settings_path);
 
     let state = AppState {
         settings_path,
@@ -1953,6 +2018,7 @@ fn main() {
             start_heartbeat,
             stop_heartbeat,
             reveal_working_dir,
+            write_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error running MusicSync");
