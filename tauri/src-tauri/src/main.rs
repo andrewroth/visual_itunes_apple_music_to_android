@@ -190,7 +190,7 @@ fn save_settings(
 }
 
 #[tauri::command]
-fn load_library(state: State<Mutex<AppState>>) -> Result<LibraryView, String> {
+fn load_library(app: AppHandle, state: State<Mutex<AppState>>) -> Result<LibraryView, String> {
     let mut guard = state.lock().unwrap();
     let library_path = guard
         .settings
@@ -206,6 +206,7 @@ fn load_library(state: State<Mutex<AppState>>) -> Result<LibraryView, String> {
     let lib_path = std::path::PathBuf::from(&library_path);
     let lib = Library::parse_file(&lib_path, &device_root, &guard.settings)
         .map_err(|e| e.to_string())?;
+    let verbose = guard.settings.verbose_logging;
 
     // Read mtime so the UI can show when the Library.xml was last exported.
     let mtime_ms = std::fs::metadata(&lib_path)
@@ -213,6 +214,8 @@ fn load_library(state: State<Mutex<AppState>>) -> Result<LibraryView, String> {
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64);
+
+    log_library_inventory(&app, verbose, &library_path, &lib);
 
     let (playlists, missing) = build_views_with_scan(&lib, &guard.settings, guard.last_scan.as_ref());
     let preview = guard.last_scan.as_ref().map(|s| compute_preview(&lib, &guard.settings, s));
@@ -695,8 +698,18 @@ struct PairChallengeEvent {
     device_name: String,
 }
 
+/// Emitted when the phone pushes DEVICE_RENAMED over the heartbeat
+/// connection. The frontend updates the "paired with X" banner in place
+/// — no rescan or reconnect.
+#[derive(Serialize, Clone)]
+struct PairedDeviceRenamedEvent {
+    device_id: String,
+    device_name: String,
+}
+
 #[derive(Serialize, Clone)]
 struct PairResultEvent {
+    device_id: String,
     device_name: String,
     music_root: String,
 }
@@ -750,6 +763,9 @@ async fn start_pairing(
         guard.settings.device_token = Some(outcome.token.clone());
         guard.settings.ftp_path = Some(outcome.music_root.clone());
         guard.settings.paired_device_name = Some(outcome.device_name.clone());
+        if !outcome.device_id.is_empty() {
+            guard.settings.paired_device_id = Some(outcome.device_id.clone());
+        }
         guard.settings_path.clone()
     };
     let snapshot = {
@@ -759,6 +775,7 @@ async fn start_pairing(
     snapshot.save(&settings_path).map_err(|e| e.to_string())?;
 
     Ok(PairResultEvent {
+        device_id: outcome.device_id,
         device_name: outcome.device_name,
         music_root: outcome.music_root,
     })
@@ -795,7 +812,7 @@ async fn scan_device(
     app: AppHandle,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<ScanResultEvent, String> {
-    use musicsync_core::matching::{mark_on_device_loose, DeviceFile};
+    use musicsync_core::matching::{mark_on_device_strict, DeviceFile};
     use std::collections::HashSet;
 
     let (mut tracks_clone, _playlists_clone, token) = {
@@ -811,10 +828,28 @@ async fn scan_device(
         )
     };
 
+    let progress_app = app.clone();
     let (device_files, device_playlists, music_root) =
-        sync::fetch_manifest_full(&ws_url, &token)
-            .await
-            .map_err(|e| e.to_string())?;
+        sync::fetch_manifest_full(&ws_url, &token, move |msg, fraction| {
+            vlog_dyn(
+                &progress_app,
+                format!(
+                    "scan_progress recv from phone: message={msg:?} fraction={fraction:?}"
+                ),
+            );
+            let _ = progress_app.emit(
+                "scan_progress",
+                ProgressEvent { message: msg.to_string(), fraction },
+            );
+            vlog_dyn(
+                &progress_app,
+                format!(
+                    "scan_progress emitted to frontend: message={msg:?} fraction={fraction:?}"
+                ),
+            );
+        })
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Compute count of non-empty / non-header lines for each on-device
     // playlist, keyed by basename without the .m3u extension. Matches
@@ -874,31 +909,30 @@ async fn scan_device(
             size_counts.len(),
             size_counts.values().filter(|&&v| v > 1).count(),
         ));
-        // Dump first 20 device files so you can sanity-check sizes.
-        for (i, (p, sz)) in device_files.iter().take(20).enumerate() {
+        // Dump every device file. Verbose mode is opt-in and meant for
+        // diagnosing real issues — truncating defeats the point.
+        for (i, (p, sz)) in device_files.iter().enumerate() {
             vlog(&app, true, format!("  device[{i}] size={sz} path={p:?}"));
         }
+        log_device_manifest_playlists(&app, true, &device_playlists);
     }
-    mark_on_device_loose(&mut tracks_clone, &dfs);
+    mark_on_device_strict(&mut tracks_clone, &dfs);
 
     if verbose {
-        // Per-track outcome. Sample heavily for big libraries so we
-        // don't blow up the log file; show every UNMATCHED track.
+        // Per-track outcome. Verbose mode dumps EVERY track on both
+        // sides — no sampling — so the log lets you grep any filename
+        // and see exactly what happened to it.
         let device_sizes: std::collections::HashSet<u64> =
             device_files.iter().map(|(_, s)| *s).collect();
         let mut matched = 0usize;
         let mut unmatched = 0usize;
-        let mut shown_matched = 0usize;
         for t in tracks_clone.values() {
             if t.on_device {
                 matched += 1;
-                if shown_matched < 20 {
-                    vlog(&app, true, format!(
-                        "MATCHED  track id={} size={} name={:?} -> some device file with size {}",
-                        t.id, t.size, t.name, t.size,
-                    ));
-                    shown_matched += 1;
-                }
+                vlog(&app, true, format!(
+                    "MATCHED  track id={} size={} name={:?} -> some device file with size {}",
+                    t.id, t.size, t.name, t.size,
+                ));
             } else {
                 unmatched += 1;
                 let nearby: Vec<u64> = device_sizes
@@ -977,6 +1011,144 @@ fn vlog(app: &AppHandle, verbose: bool, line: impl AsRef<str>) {
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&path) {
         let _ = writeln!(f, "{} {}", chrono_now_hms(), s);
     }
+}
+
+/// Same as [vlog] but reads the `verbose_logging` flag from app state on
+/// each call. Used by long-lived background tasks (e.g. the heartbeat)
+/// where the user may toggle the setting while the task is running.
+fn vlog_dyn(app: &AppHandle, line: impl AsRef<str>) {
+    let verbose = app
+        .try_state::<Mutex<AppState>>()
+        .map(|s| s.lock().map(|g| g.settings.verbose_logging).unwrap_or(false))
+        .unwrap_or(false);
+    vlog(app, verbose, line);
+}
+
+fn log_library_inventory(
+    app: &AppHandle,
+    verbose: bool,
+    library_path: &str,
+    lib: &Library,
+) {
+    if !verbose { return; }
+    vlog(
+        app,
+        true,
+        format!(
+            "=== library load start: path={library_path:?} tracks={} playlists={}",
+            lib.tracks.len(),
+            lib.playlists.len(),
+        ),
+    );
+
+    let mut track_ids: Vec<&String> = lib.tracks.keys().collect();
+    track_ids.sort();
+    for id in track_ids {
+        let t = &lib.tracks[id];
+        vlog(
+            app,
+            true,
+            format!(
+                "LIB_TRACK id={} size={} name={:?} artist={:?} local={:?} device={:?} on_device={}",
+                t.id,
+                t.size,
+                t.name,
+                t.artist,
+                t.local_path,
+                t.device_path,
+                t.on_device,
+            ),
+        );
+    }
+
+    let mut playlists: Vec<&musicsync_core::playlist::Playlist> = lib.playlists.iter().collect();
+    playlists.sort_by(|a, b| a.name.cmp(&b.name).then(a.playlist_id.cmp(&b.playlist_id)));
+    for pl in playlists {
+        vlog(
+            app,
+            true,
+            format!(
+                "LIB_PLAYLIST id={} name={:?} checked={} tracks={}",
+                pl.playlist_id,
+                pl.name,
+                pl.checked,
+                pl.track_ids.len(),
+            ),
+        );
+        for (idx, track_id) in pl.track_ids.iter().enumerate() {
+            match lib.tracks.get(track_id) {
+                Some(t) => vlog(
+                    app,
+                    true,
+                    format!(
+                        "  LIB_PLAYLIST_TRACK playlist_id={} index={} track_id={} name={:?} artist={:?} size={} local={:?} device={:?}",
+                        pl.playlist_id,
+                        idx,
+                        t.id,
+                        t.name,
+                        t.artist,
+                        t.size,
+                        t.local_path,
+                        t.device_path,
+                    ),
+                ),
+                None => vlog(
+                    app,
+                    true,
+                    format!(
+                        "  LIB_PLAYLIST_TRACK playlist_id={} index={} track_id={} MISSING_FROM_LIBRARY",
+                        pl.playlist_id,
+                        idx,
+                        track_id,
+                    ),
+                ),
+            }
+        }
+    }
+    vlog(app, true, "=== library load end");
+}
+
+fn log_device_manifest_playlists(
+    app: &AppHandle,
+    verbose: bool,
+    device_playlists: &[musicsync_core::protocol::ManifestPlaylist],
+) {
+    if !verbose { return; }
+    vlog(
+        app,
+        true,
+        format!(
+            "=== device playlist manifest start: {} playlist files",
+            device_playlists.len(),
+        ),
+    );
+    let mut playlists: Vec<&musicsync_core::protocol::ManifestPlaylist> =
+        device_playlists.iter().collect();
+    playlists.sort_by(|a, b| a.name.cmp(&b.name));
+    for p in playlists {
+        vlog(
+            app,
+            true,
+            format!(
+                "DEVICE_PLAYLIST name={:?} mtime={} bytes={} content_start",
+                p.name,
+                p.mtime,
+                p.content.len(),
+            ),
+        );
+        for (idx, line) in p.content.lines().enumerate() {
+            vlog(
+                app,
+                true,
+                format!("  DEVICE_PLAYLIST_LINE name={:?} line={} text={:?}", p.name, idx, line),
+            );
+        }
+        if p.content.is_empty() {
+            vlog(app, true, format!("  DEVICE_PLAYLIST_LINE name={:?} EMPTY", p.name));
+        }
+        vlog(app, true, format!("DEVICE_PLAYLIST name={:?} content_end", p.name));
+    }
+    vlog(app, true, "=== device playlist manifest end");
 }
 
 fn chrono_today_yyyy_mm_dd() -> String {
@@ -1167,6 +1339,7 @@ fn start_heartbeat(
 
         loop {
             // Try to open the WS.
+            vlog_dyn(&app_handle, format!("heartbeat: connecting to {ws_url}"));
             let ws = match tokio_tungstenite::connect_async(&ws_url).await {
                 Ok((w, _)) => w,
                 Err(e) => {
@@ -1174,6 +1347,10 @@ fn start_heartbeat(
                         let _ = app_handle.emit("device_dead", ());
                         last_emitted_alive = Some(false);
                     }
+                    vlog_dyn(
+                        &app_handle,
+                        format!("heartbeat: connect failed: {e}; retry in {backoff_secs}s"),
+                    );
                     tracing::debug!("heartbeat connect failed: {e}; retry in {backoff_secs}s");
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(15);
@@ -1181,6 +1358,7 @@ fn start_heartbeat(
                 }
             };
             backoff_secs = 1;
+            vlog_dyn(&app_handle, "heartbeat: WS connected, sending HELLO");
             let (mut sink, mut stream) = ws.split();
 
             // HELLO + expect HELLO_OK.
@@ -1245,55 +1423,145 @@ fn start_heartbeat(
                 last_emitted_alive = Some(true);
             }
 
-            // Active ping/pong loop. We send a WS PING every 2 seconds
+            // Active ping/pong loop. We send a WS PING every 1 second
             // and track the most recent Pong. State machine:
-            //   alive   — got a pong within the last 4 seconds
-            //   yellow  — 4-9 seconds since the last pong
-            //   dead    — 9+ seconds → close and reconnect
+            //   alive   — got a pong within the last 2 seconds
+            //   yellow  — 2-5 seconds since the last pong
+            //   dead    — 5+ seconds → close and reconnect
+            //
+            // Tight intervals because killing the companion app on the
+            // phone doesn't always send a TCP FIN — we have to notice
+            // the missing pongs ourselves, and the user expects the
+            // green dot to drop within ~5s when they close the app.
             let mut last_pong = tokio::time::Instant::now();
-            let mut ping_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+            let mut ping_tick = tokio::time::interval(std::time::Duration::from_secs(1));
             ping_tick.tick().await; // immediate first tick consumed
             let mut emitted_yellow = false;
+            // Reason the inner loop exited, surfaced in verbose logs so
+            // we can tell apart "phone went away" (pong stale) from "WS
+            // got a real Close" or "send failed" cases.
+            let exit_reason: &str;
             'inner: loop {
                 tokio::select! {
                     _ = ping_tick.tick() => {
-                        if sink
-                            .send(Message::Ping(Vec::<u8>::new().into()))
-                            .await
-                            .is_err()
-                        {
-                            break 'inner;
+                        let since_before_send = last_pong.elapsed();
+                        match sink.send(Message::Ping(Vec::<u8>::new().into())).await {
+                            Ok(_) => {
+                                vlog_dyn(
+                                    &app_handle,
+                                    format!(
+                                        "heartbeat: → PING (last pong {:.1}s ago)",
+                                        since_before_send.as_secs_f32(),
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                vlog_dyn(
+                                    &app_handle,
+                                    format!("heartbeat: PING send failed: {e}"),
+                                );
+                                exit_reason = "ping send failed";
+                                break 'inner;
+                            }
                         }
                         let since = last_pong.elapsed();
-                        if since > std::time::Duration::from_secs(9) {
-                            break 'inner; // dead
-                        } else if since > std::time::Duration::from_secs(4) {
+                        if since > std::time::Duration::from_secs(5) {
+                            vlog_dyn(
+                                &app_handle,
+                                format!(
+                                    "heartbeat: no pong for {:.1}s — declaring dead",
+                                    since.as_secs_f32(),
+                                ),
+                            );
+                            exit_reason = "pong timeout (>5s)";
+                            break 'inner;
+                        } else if since > std::time::Duration::from_secs(2) {
                             if !emitted_yellow {
+                                vlog_dyn(
+                                    &app_handle,
+                                    format!(
+                                        "heartbeat: no pong for {:.1}s — yellow",
+                                        since.as_secs_f32(),
+                                    ),
+                                );
                                 let _ = app_handle.emit("device_yellow", ());
                                 emitted_yellow = true;
                             }
                         }
                     }
                     frame = stream.next() => {
-                        let Some(frame) = frame else { break 'inner; };
+                        let Some(frame) = frame else {
+                            vlog_dyn(&app_handle, "heartbeat: stream ended (None)");
+                            exit_reason = "stream ended";
+                            break 'inner;
+                        };
                         match frame {
                             Ok(Message::Pong(_)) => {
+                                let gap = last_pong.elapsed();
                                 last_pong = tokio::time::Instant::now();
+                                vlog_dyn(
+                                    &app_handle,
+                                    format!(
+                                        "heartbeat: ← PONG (gap {:.1}s)",
+                                        gap.as_secs_f32(),
+                                    ),
+                                );
                                 if emitted_yellow {
                                     let _ = app_handle.emit("device_alive", ());
                                     emitted_yellow = false;
                                 }
                             }
                             Ok(Message::Ping(payload)) => {
+                                vlog_dyn(
+                                    &app_handle,
+                                    "heartbeat: ← PING from phone, replying PONG",
+                                );
                                 let _ = sink.send(Message::Pong(payload)).await;
                             }
-                            Ok(Message::Text(_)) | Ok(Message::Binary(_)) => continue,
-                            Ok(Message::Close(_)) | Err(_) => break 'inner,
+                            Ok(Message::Text(t)) => {
+                                // The heartbeat WS is also the live channel for
+                                // server-pushed notifications. Currently only
+                                // DEVICE_RENAMED — update the persisted display
+                                // label and let the UI redraw in place.
+                                if let Ok(ServerMessage::DeviceRenamed { device_id, device_name }) =
+                                    serde_json::from_str::<ServerMessage>(&t)
+                                {
+                                    vlog_dyn(
+                                        &app_handle,
+                                        format!(
+                                            "heartbeat: ← DEVICE_RENAMED id={device_id} name={device_name}",
+                                        ),
+                                    );
+                                    handle_device_renamed(&app_handle, device_id, device_name);
+                                }
+                            }
+                            Ok(Message::Binary(_)) => continue,
+                            Ok(Message::Close(cf)) => {
+                                vlog_dyn(
+                                    &app_handle,
+                                    format!("heartbeat: ← Close frame: {cf:?}"),
+                                );
+                                exit_reason = "close frame";
+                                break 'inner;
+                            }
+                            Err(e) => {
+                                vlog_dyn(
+                                    &app_handle,
+                                    format!("heartbeat: stream error: {e}"),
+                                );
+                                exit_reason = "stream error";
+                                break 'inner;
+                            }
                             _ => continue,
                         }
                     }
                 }
             }
+
+            vlog_dyn(
+                &app_handle,
+                format!("heartbeat: inner loop exited ({exit_reason}); reconnecting in 1s"),
+            );
 
             if last_emitted_alive != Some(false) {
                 let _ = app_handle.emit("device_dead", ());
@@ -1307,6 +1575,66 @@ fn start_heartbeat(
     let mut guard = state.lock().unwrap();
     guard.heartbeat_task = Some(handle);
     Ok(())
+}
+
+/// Apply an incoming DEVICE_RENAMED notification: persist the new display
+/// label against the matching paired phone (matched by `device_id`) and
+/// emit `paired_device_renamed` so the UI can update its banner without
+/// triggering a rescan or reconnect.
+fn handle_device_renamed(app: &AppHandle, device_id: String, device_name: String) {
+    if device_id.is_empty() || device_name.is_empty() {
+        return;
+    }
+    let state = app.state::<Mutex<AppState>>();
+    let path = {
+        let mut guard = state.lock().unwrap();
+        // Only accept the rename if it matches our currently-paired device.
+        // (Backwards-compat: if we don't have a stored device_id yet, adopt
+        // the one we just learned about so subsequent renames are matched.)
+        match guard.settings.paired_device_id.clone() {
+            Some(existing) if existing == device_id => {}
+            Some(_) => return, // mismatched — ignore
+            None => {
+                guard.settings.paired_device_id = Some(device_id.clone());
+            }
+        }
+        if guard.settings.paired_device_name.as_deref() == Some(device_name.as_str()) {
+            return; // no change; don't bother re-saving
+        }
+        guard.settings.paired_device_name = Some(device_name.clone());
+        guard.settings_path.clone()
+    };
+    let snapshot = {
+        let guard = state.lock().unwrap();
+        guard.settings.clone()
+    };
+    if let Err(e) = snapshot.save(&path) {
+        tracing::warn!("failed to persist renamed device label: {e}");
+    }
+    let _ = app.emit(
+        "paired_device_renamed",
+        PairedDeviceRenamedEvent { device_id, device_name },
+    );
+}
+
+/// Open the process working directory (where the dated `musicsync-*.log`
+/// files are written) in the OS file browser. Returned string is the
+/// absolute path so the frontend can surface it in a tooltip / error.
+#[tauri::command]
+fn reveal_working_dir() -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let path_str = cwd.to_string_lossy().to_string();
+    #[cfg(target_os = "macos")]
+    let cmd = ("open", vec![path_str.as_str()]);
+    #[cfg(target_os = "windows")]
+    let cmd = ("explorer", vec![path_str.as_str()]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = ("xdg-open", vec![path_str.as_str()]);
+    std::process::Command::new(cmd.0)
+        .args(&cmd.1)
+        .spawn()
+        .map_err(|e| format!("failed to open file browser: {e}"))?;
+    Ok(path_str)
 }
 
 #[tauri::command]
@@ -1332,6 +1660,7 @@ fn forget_pairing(state: State<'_, Mutex<AppState>>) -> Result<(), String> {
     let mut guard = state.lock().unwrap();
     guard.settings.device_token = None;
     guard.settings.paired_device_name = None;
+    guard.settings.paired_device_id = None;
     let path = guard.settings_path.clone();
     let to_save = guard.settings.clone();
     drop(guard);
@@ -1341,11 +1670,17 @@ fn forget_pairing(state: State<'_, Mutex<AppState>>) -> Result<(), String> {
 #[tauri::command]
 fn add_ignored_device(
     device_name: String,
+    device_id: Option<String>,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<(), String> {
     let mut guard = state.lock().unwrap();
     if !guard.settings.ignored_devices.iter().any(|n| n == &device_name) {
         guard.settings.ignored_devices.push(device_name);
+    }
+    if let Some(id) = device_id.filter(|s| !s.is_empty()) {
+        if !guard.settings.ignored_device_ids.iter().any(|v| v == &id) {
+            guard.settings.ignored_device_ids.push(id);
+        }
     }
     let path = guard.settings_path.clone();
     let to_save = guard.settings.clone();
@@ -1617,6 +1952,7 @@ fn main() {
             start_lan_scan,
             start_heartbeat,
             stop_heartbeat,
+            reveal_working_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error running MusicSync");

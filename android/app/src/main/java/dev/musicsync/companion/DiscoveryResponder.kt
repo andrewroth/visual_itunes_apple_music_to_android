@@ -18,10 +18,11 @@ import java.net.InetAddress
  *
  * Wire format:
  *   request:  bytes "MUSICSYNC_DISCOVER\n"
- *   response: bytes "MUSICSYNC_HERE {\"name\":\"<device>\",\"port\":7800}\n"
+ *   response: bytes "MUSICSYNC_HERE {\"name\":\"<device>\",\"id\":\"<uuid>\",\"port\":7800}\n"
  */
 class DiscoveryResponder(
     private val deviceName: () -> String,
+    private val deviceId: () -> String,
     private val mainPort: Int = DEFAULT_PORT,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -49,8 +50,9 @@ class DiscoveryResponder(
                 val payload = String(pkt.data, 0, pkt.length, Charsets.UTF_8).trim()
                 if (!payload.startsWith(PROBE_PREAMBLE)) continue
                 val name = deviceName().replace("\\", "\\\\").replace("\"", "\\\"")
+                val id = deviceId().replace("\\", "\\\\").replace("\"", "\\\"")
                 val replyText =
-                    "$REPLY_PREAMBLE {\"name\":\"$name\",\"port\":$mainPort}\n"
+                    "$REPLY_PREAMBLE {\"name\":\"$name\",\"id\":\"$id\",\"port\":$mainPort}\n"
                 val replyBytes = replyText.toByteArray(Charsets.UTF_8)
                 try {
                     sock.send(DatagramPacket(replyBytes, replyBytes.size, pkt.address, pkt.port))

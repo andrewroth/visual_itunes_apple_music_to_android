@@ -71,6 +71,7 @@ sealed class ServerMessage {
     @Serializable
     @SerialName("HELLO_OK")
     data class HelloOk(
+        val device_id: String,
         val device_name: String,
         val music_root: String,
         val protocol_version: Int,
@@ -78,14 +79,31 @@ sealed class ServerMessage {
 
     @Serializable
     @SerialName("PAIR_CHALLENGE")
-    data class PairChallenge(val code: String, val device_name: String) : ServerMessage()
+    data class PairChallenge(
+        val code: String,
+        val device_id: String,
+        val device_name: String,
+    ) : ServerMessage()
 
     @Serializable
     @SerialName("PAIR_OK")
     data class PairOk(
         val token: String,
+        val device_id: String,
         val device_name: String,
         val music_root: String,
+    ) : ServerMessage()
+
+    /**
+     * Pushed unsolicited over an open session when the user renames the
+     * phone. The desktop updates its display label without re-pairing or
+     * re-scanning — identity is the immutable [device_id].
+     */
+    @Serializable
+    @SerialName("DEVICE_RENAMED")
+    data class DeviceRenamed(
+        val device_id: String,
+        val device_name: String,
     ) : ServerMessage()
 
     @Serializable

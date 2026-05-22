@@ -45,6 +45,10 @@ class SyncServer(private val config: Config) {
         /** Read fresh each time so renames take effect without restarting
          *  the server. The mDNS advertiser is restarted separately. */
         val deviceName: () -> String,
+        /** Stable UUID for this phone. Sent in HELLO_OK / PAIR_OK /
+         *  PAIR_CHALLENGE / DEVICE_RENAMED so the desktop pins identity
+         *  to a value the user can't change. */
+        val deviceId: () -> String,
         val verifyToken: (String) -> Boolean,
         /** Generates a brand-new token for this pair attempt and stores
          *  it on the phone. Receives the desktop's announced user+host
@@ -105,6 +109,31 @@ class SyncServer(private val config: Config) {
 
     private fun fireClientsChanged() {
         config.onClientsChanged(activeClients.map { it.label })
+    }
+
+    /**
+     * Push a DEVICE_RENAMED notification to every connected desktop on
+     * the current set of live sessions. Used by [SyncService.renameDevice]
+     * so the desktop UI updates its "paired with X" banner instantly
+     * without having to drop and re-establish the heartbeat connection.
+     */
+    fun broadcastRename(deviceId: String, newName: String) {
+        if (deviceId.isEmpty()) return
+        val snapshot = activeClients.toList()
+        val msg = ServerMessage.DeviceRenamed(device_id = deviceId, device_name = newName)
+        val text = json.encodeToString(ServerMessage.serializer(), msg)
+        for (c in snapshot) {
+            try {
+                kotlinx.coroutines.runBlocking {
+                    c.session.outgoing.send(Frame.Text(text))
+                }
+            } catch (_: Exception) {
+                // Session is in the process of dying; nothing to do — the
+                // desktop will pick up the new name on its next reconnect
+                // via HELLO_OK anyway.
+            }
+        }
+        config.onEvent("pushed rename to ${snapshot.size} desktop(s)")
     }
 
     /** Close every connected desktop. They will reconnect on their own
@@ -215,6 +244,7 @@ class SyncServer(private val config: Config) {
             send(
                 session,
                 ServerMessage.HelloOk(
+                    device_id = config.deviceId(),
                     device_name = config.deviceName(),
                     music_root = config.musicRootDisplay().trimEnd('/') + "/",
                     protocol_version = PROTOCOL_VERSION,
@@ -237,7 +267,25 @@ class SyncServer(private val config: Config) {
                             root,
                             config.contentResolver,
                             onProgress = { p ->
+                                // Local UI signal (phone's own scan banner).
                                 config.onScanProgress(p.filesSoFar, p.topLevelDone, p.topLevelTotal)
+                                // Mirror to the connected desktop so it can
+                                // render the same %. trySend is non-blocking
+                                // and drops on backpressure — fine for a
+                                // progress stream where the latest wins.
+                                val frac = if (p.topLevelTotal > 0) {
+                                    (p.topLevelDone.toFloat() / p.topLevelTotal.toFloat())
+                                        .coerceIn(0f, 1f)
+                                } else null
+                                val msg = if (p.topLevelTotal > 0) {
+                                    "Scanning phone: ${p.filesSoFar} files " +
+                                        "(${p.topLevelDone}/${p.topLevelTotal} folders)"
+                                } else {
+                                    "Scanning phone: ${p.filesSoFar} files"
+                                }
+                                val progress = ServerMessage.Progress(message = msg, fraction = frac)
+                                val text = json.encodeToString(ServerMessage.serializer(), progress)
+                                session.outgoing.trySend(Frame.Text(text))
                             },
                         )
                         config.onScanComplete(files.size, playlists.size)
@@ -321,7 +369,14 @@ class SyncServer(private val config: Config) {
         config.onEvent(
             "pairing started for ${request.desktop_user}@${request.desktop_host}, code=$code"
         )
-        send(session, ServerMessage.PairChallenge(code, config.deviceName()))
+        send(
+            session,
+            ServerMessage.PairChallenge(
+                code = code,
+                device_id = config.deviceId(),
+                device_name = config.deviceName(),
+            ),
+        )
 
         // DefaultWebSocketServerSession is a CoroutineScope — `session.launch`
         // spawns children tied to the connection's lifetime. We must satisfy
@@ -403,6 +458,7 @@ class SyncServer(private val config: Config) {
                 session,
                 ServerMessage.PairOk(
                     token = token,
+                    device_id = config.deviceId(),
                     device_name = config.deviceName(),
                     music_root = config.musicRootDisplay().trimEnd('/') + "/",
                 ),

@@ -59,9 +59,18 @@ pub struct Settings {
     pub device_token: Option<String>,
 
     /// Friendly name of the paired phone (e.g. "Pixel 7"). Set during
-    /// pairing; shown in the UI's "Paired with…" banner.
+    /// pairing; shown in the UI's "Paired with…" banner. This is a
+    /// mutable display label — the durable identity is `paired_device_id`.
     #[serde(rename = "paired_device_name", default, skip_serializing_if = "Option::is_none")]
     pub paired_device_name: Option<String>,
+
+    /// Stable UUID of the paired phone. Generated once on the phone and
+    /// reported in HELLO_OK / PAIR_OK; used by the desktop as the
+    /// durable peer identity (so rename on the phone doesn't look like a
+    /// new device). Absent for pairings created before this field
+    /// existed; in that case identity falls back to `paired_device_name`.
+    #[serde(rename = "paired_device_id", default, skip_serializing_if = "Option::is_none")]
+    pub paired_device_id: Option<String>,
 
     /// Parallel record of every playlist the user has ever selected, with
     /// its human-readable name and a pending action. Survives a playlist
@@ -94,9 +103,16 @@ pub struct Settings {
     /// Device names ("Pixel 7", "Galaxy S24") the user has explicitly
     /// rejected during pairing. mDNS hits matching any of these are
     /// silently skipped on discovery. Cleared only by the user via the
-    /// UI (no auto-pruning).
+    /// UI (no auto-pruning). Kept for backwards compatibility — new
+    /// rejections also go into `ignored_device_ids` so a later rename
+    /// can't bypass the rejection.
     #[serde(rename = "ignored_devices", default)]
     pub ignored_devices: Vec<String>,
+
+    /// `device_id` UUIDs the user has rejected. Preferred over
+    /// `ignored_devices` because it survives renames.
+    #[serde(rename = "ignored_device_ids", default)]
+    pub ignored_device_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

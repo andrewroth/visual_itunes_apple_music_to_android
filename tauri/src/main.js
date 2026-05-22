@@ -69,10 +69,34 @@ function formatTime(ms) {
   return new Date(ms).toLocaleTimeString();
 }
 
+function verboseLog(line) {
+  if (!lastSettings.verbose_logging) return;
+  appendLog(line);
+}
+
 // Scan lifecycle messages — route through the status line, no separate
 // banner above the playlist table.
 listen("scan_started", () => {
   setStatusMessage("info", "Scanning...");
+});
+// Mirror of the phone's own scan progress bar, pushed over the WS as
+// PROGRESS frames while ManifestBuilder walks the music folder. Drives
+// the status line + bottom progress bar so the desktop reflects the
+// same percentage the phone shows.
+listen("scan_progress", (e) => {
+  const { message, fraction } = e.payload;
+  verboseLog(
+    `scan_progress event received: message=${JSON.stringify(message)} ` +
+    `fraction=${typeof fraction === "number" ? fraction : "null"}`
+  );
+  setStatusMessage("info", message);
+  if (typeof fraction === "number") {
+    const pct = Math.round(fraction * 100);
+    verboseLog(`scan_progress updating bar width to ${pct}%`);
+    $("progress").style.width = `${pct}%`;
+  } else {
+    verboseLog("scan_progress had no numeric fraction; leaving bar width unchanged");
+  }
 });
 listen("scan_complete", (e) => {
   const { files, playlists } = e.payload;
@@ -626,6 +650,10 @@ async function stopSync() {
 // emits, the frontend listens, no polling.
 listen("progress", (e) => {
   const { message, fraction } = e.payload;
+  verboseLog(
+    `progress event received: message=${JSON.stringify(message)} ` +
+    `fraction=${typeof fraction === "number" ? fraction : "null"}`
+  );
   // Pick a colour from the message content. Most progress is info; the
   // explicit successes / errors / aborts get matching styles.
   let level = "info";
@@ -633,7 +661,11 @@ listen("progress", (e) => {
   else if (/complete|done/i.test(message)) level = "success";
   setStatusMessage(level, message);
   if (typeof fraction === "number") {
-    $("progress").style.width = `${Math.round(fraction * 100)}%`;
+    const pct = Math.round(fraction * 100);
+    verboseLog(`progress updating bar width to ${pct}%`);
+    $("progress").style.width = `${pct}%`;
+  } else {
+    verboseLog("progress had no numeric fraction; leaving bar width unchanged");
   }
   appendLog(message);
 });
@@ -757,6 +789,7 @@ async function forgetPairing() {
   await invoke("stop_heartbeat").catch(() => {});
   lastSettings.device_token = null;
   lastSettings.paired_device_name = null;
+  lastSettings.paired_device_id = null;
   window._wsUrl = "";
   _triedDevices.clear();
   _heartbeatAlive = false;
@@ -1015,17 +1048,46 @@ listen("device_dead", () => {
   }
 });
 
+// The phone pushes DEVICE_RENAMED over the persistent heartbeat WS
+// whenever the user changes its display name. The backend updates
+// settings on disk and then emits this so the UI redraws the "paired
+// with X" banner in place — no scan, no reconnect.
+listen("paired_device_renamed", async (e) => {
+  const { device_id, device_name } = e.payload;
+  lastSettings.paired_device_name = device_name;
+  if (device_id) lastSettings.paired_device_id = device_id;
+  if (window._foundDeviceName) window._foundDeviceName = device_name;
+  // Re-render whichever indicator is currently visible.
+  if (window._wsUrl && window._foundDeviceName) {
+    renderFoundDot(_heartbeatAlive ? "success" : "warning");
+  }
+  renderPairedBanner(lastSettings);
+  appendLog(`Phone renamed to ${device_name}`);
+});
+
 listen("discovery_found", async (e) => {
-  const { ws_url, device_name } = e.payload;
-  if (_triedDevices.has(ws_url)) return; // already handled this hit
-  _triedDevices.add(ws_url);
+  const { ws_url, device_name, device_id } = e.payload;
+  // Dedup by device_id when the companion advertises one — that's the
+  // stable identity, so a rename (which changes the mDNS instance name
+  // and re-fires discovery_found) hits the same key and is ignored.
+  // Fall back to ws_url for older companions without device_id.
+  const dedupKey = device_id || ws_url;
+  if (_triedDevices.has(dedupKey)) return;
+  _triedDevices.add(dedupKey);
   appendLog(`Discovered ${device_name} at ${ws_url}`);
 
   if (lastSettings.device_token) {
-    // We have a token. Try it — the token (not the name) is the actual
-    // identity, so renames on the phone don't matter. If the phone
-    // rejects, log clearly and stop. Pairings don't get clobbered
-    // automatically; the user decides to Forget if they want.
+    // We have a token. If we know our paired phone's device_id, only act
+    // on the matching device — that's the durable identity. Otherwise
+    // fall back to trying any hit (legacy pairings without a stored id).
+    if (
+      device_id &&
+      lastSettings.paired_device_id &&
+      device_id !== lastSettings.paired_device_id
+    ) {
+      appendLog(`Ignoring ${device_name}: not the paired phone`);
+      return;
+    }
     showFoundState(device_name, ws_url);
     try {
       await scanDevice();
@@ -1128,6 +1190,21 @@ window.addEventListener("DOMContentLoaded", async () => {
       );
     });
   }
+  // "working directory" link in the verbose-logging blurb — opens the
+  // log directory in the OS file browser (Finder / Explorer / xdg-open).
+  const revealBtn = $("reveal_working_dir");
+  if (revealBtn) {
+    revealBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      try {
+        const path = await invoke("reveal_working_dir");
+        appendLog(`Opened working directory: ${path}`);
+      } catch (err) {
+        appendLog(`Could not open working directory: ${err}`);
+      }
+    });
+  }
+
   // Backend-pushed log lines (verbose tracing dumps).
   listen("log_line", (e) => appendLog(e.payload));
   const msg1 = `MusicSync frontend ${MUSICSYNC_BUILD} ready`;

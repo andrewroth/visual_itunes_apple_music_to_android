@@ -14,6 +14,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 pub struct PairOutcome {
     pub token: String,
+    pub device_id: String,
     pub device_name: String,
     pub music_root: String,
 }
@@ -50,7 +51,7 @@ where
     .await?;
     let challenge = recv_text(&mut stream).await?;
     let (code, _challenge_device) = match challenge {
-        ServerMessage::PairChallenge { code, device_name } => (code, device_name),
+        ServerMessage::PairChallenge { code, device_name, .. } => (code, device_name),
         ServerMessage::Error { message } => return Err(anyhow!("phone error: {message}")),
         other => return Err(anyhow!("unexpected response to PAIR_REQUEST: {other:?}")),
     };
@@ -72,8 +73,8 @@ where
     // server-side 60s timeout as a safety net).
     let final_msg = recv_text(&mut stream).await?;
     match final_msg {
-        ServerMessage::PairOk { token, device_name, music_root } => {
-            Ok(PairOutcome { token, device_name, music_root })
+        ServerMessage::PairOk { token, device_id, device_name, music_root } => {
+            Ok(PairOutcome { token, device_id, device_name, music_root })
         }
         ServerMessage::PairCancelled { reason } => {
             Err(anyhow!("phone cancelled: {reason}"))

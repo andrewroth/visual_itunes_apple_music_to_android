@@ -399,10 +399,9 @@
       </div>
 
       <div class="tab-pane fade" id="logtab" role="tabpanel">
-        <div
-          id="log"
-          style="max-height: 400px; overflow: scroll; font-family: monospace"
-        ></div>
+        <div class="log-viewer-shell">
+          <div id="log" class="log-viewer"></div>
+        </div>
       </div>
 
       <div class="tab-pane fade" id="abouttab" role="tabpanel">
@@ -427,8 +426,9 @@
           </label>
           <div class="text-muted small">
             Writes per-track matching details into the Log tab AND a dated
-            file <code>musicsync-YYYY-MM-DD.log</code> in the working
-            directory. Useful for "this file is on the phone but it's
+            file <code>musicsync-YYYY-MM-DD.log</code> in the
+            <a href="#" id="reveal_working_dir" role="button">working
+            directory</a>. Useful for "this file is on the phone but it's
             still trying to upload it" type issues.
           </div>
         </div>

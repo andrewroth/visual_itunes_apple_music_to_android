@@ -42,6 +42,32 @@ body > .tab-content > .tab-pane.show.active {
 #log div { white-space: pre-wrap; }
 #playlists tbody tr { cursor: pointer; user-select: none; }
 
+#logtab {
+  min-height: 0;
+}
+
+#logtab.show.active {
+  padding-top: 4px;
+}
+
+.log-viewer-shell {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.log-viewer {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid #ced4da;
+  border-radius: 0.5rem;
+  background: #111;
+  color: #e9ecef;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
 /* Sync/Stop buttons don't shrink below a fixed width when the status
    banner alongside them is long. */
 #sync, #stop_sync { min-width: 125px; }

@@ -12,7 +12,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use musicsync_core::matching::{mark_on_device_loose, tracks_to_upload, DeviceFile};
+use musicsync_core::matching::{mark_on_device_strict, tracks_to_upload, DeviceFile};
 use musicsync_core::playlist::{m3u_semantically_equal, Playlist};
 use musicsync_core::protocol::{
     ClientMessage, ManifestFile, ManifestPlaylist, ServerMessage, PROTOCOL_VERSION,
@@ -32,9 +32,15 @@ pub struct SyncReport {
 /// Standalone scan: connects, sends HELLO + MANIFEST_REQUEST, returns
 /// every file (path, size), every playlist (full manifest entries), and
 /// the device music root. Used by the scan_device Tauri command.
+///
+/// `on_progress` is called for every PROGRESS message the phone pushes
+/// while it walks its music folder, so the desktop can mirror the phone's
+/// progress bar in real time. Arguments are `(message, fraction)` where
+/// fraction is in `[0, 1]` when known.
 pub async fn fetch_manifest_full(
     ws_url: &str,
     token: &str,
+    on_progress: impl Fn(&str, Option<f32>) + Send + Sync,
 ) -> Result<(Vec<(String, u64)>, Vec<ManifestPlaylist>, String)> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
         .await
@@ -59,13 +65,21 @@ pub async fn fetch_manifest_full(
         other => return Err(anyhow!("unexpected response to HELLO: {other:?}")),
     };
     send_msg(&mut sink, &ClientMessage::ManifestRequest).await?;
-    let manifest = recv_msg(&mut stream).await?;
-    let (files, playlists) = match manifest {
-        ServerMessage::Manifest { files, playlists } => {
-            let files = files.into_iter().map(|f| (f.path, f.size)).collect();
-            (files, playlists)
+    // The phone may push PROGRESS frames before the final MANIFEST while
+    // it walks its music folder. Forward those through the callback and
+    // keep reading until the actual manifest arrives.
+    let (files, playlists) = loop {
+        match recv_msg(&mut stream).await? {
+            ServerMessage::Progress { message, fraction } => {
+                on_progress(&message, fraction);
+                continue;
+            }
+            ServerMessage::Manifest { files, playlists } => {
+                let files = files.into_iter().map(|f| (f.path, f.size)).collect();
+                break (files, playlists);
+            }
+            other => return Err(anyhow!("unexpected response to MANIFEST_REQUEST: {other:?}")),
         }
-        other => return Err(anyhow!("unexpected response to MANIFEST_REQUEST: {other:?}")),
     };
     let _ = send_msg(&mut sink, &ClientMessage::Bye).await;
     Ok((files, playlists, music_root))
@@ -137,10 +151,18 @@ pub async fn run_sync(
     progress("Scanning...", None);
     on_scan_started();
     send_msg(&mut sink, &ClientMessage::ManifestRequest).await?;
-    let manifest = recv_msg(&mut stream).await?;
-    let (files, device_playlists) = match manifest {
-        ServerMessage::Manifest { files, playlists } => (files, playlists),
-        other => return Err(anyhow!("unexpected response to MANIFEST_REQUEST: {other:?}")),
+    // Forward the phone's PROGRESS frames through the same progress
+    // channel so the UI's status line + progress bar update during the
+    // scan, then break out when the final MANIFEST arrives.
+    let (files, device_playlists) = loop {
+        match recv_msg(&mut stream).await? {
+            ServerMessage::Progress { message, fraction } => {
+                progress(&message, fraction);
+                continue;
+            }
+            ServerMessage::Manifest { files, playlists } => break (files, playlists),
+            other => return Err(anyhow!("unexpected response to MANIFEST_REQUEST: {other:?}")),
+        }
     };
     on_scan_complete(files.len(), device_playlists.len());
     progress(
@@ -157,7 +179,7 @@ pub async fn run_sync(
         .iter()
         .map(|f| DeviceFile { path: f.path.clone(), size: f.size })
         .collect();
-    mark_on_device_loose(tracks, &device_files);
+    mark_on_device_strict(tracks, &device_files);
 
     // Delete playlists + any unused-track files. Server returns OK even
     // when the path is absent, so we don't gate on the manifest content.

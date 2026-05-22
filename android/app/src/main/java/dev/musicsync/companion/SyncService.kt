@@ -40,9 +40,13 @@ class SyncService : Service() {
     val pairingManager = PairingManager()
     private val advertiser by lazy { MdnsAdvertiser(applicationContext) }
     private val deviceNameStore by lazy { DeviceNameStore(applicationContext) }
+    private val deviceIdStore by lazy { DeviceIdStore(applicationContext) }
     private val musicRootStore by lazy { MusicRootStore(applicationContext) }
     private val discoveryResponder by lazy {
-        DiscoveryResponder(deviceName = { deviceNameStore.get() })
+        DiscoveryResponder(
+            deviceName = { deviceNameStore.get() },
+            deviceId = { deviceIdStore.get() },
+        )
     }
 
     private val _deviceName = MutableStateFlow<String>("")
@@ -202,6 +206,7 @@ class SyncService : Service() {
                 musicRootDisplay = { musicRootStore.getDisplayPath() },
                 contentResolver = applicationContext.contentResolver,
                 deviceName = { deviceNameStore.get() },
+                deviceId = { deviceIdStore.get() },
                 verifyToken = { tokens.verify(it) },
                 // Multi-pair: every successful pair appends a new entry
                 // with the desktop's identifier. No rejection gate.
@@ -268,7 +273,7 @@ class SyncService : Service() {
         )
         startForeground(NOTIF_ID, buildNotification("listening"))
         server?.start()
-        advertiser.register(deviceNameStore.get(), DEFAULT_PORT)
+        advertiser.register(deviceNameStore.get(), deviceIdStore.get(), DEFAULT_PORT)
         discoveryResponder.start()
         armSearchTimeout()
     }
@@ -311,19 +316,28 @@ class SyncService : Service() {
     }
 
     /**
-     * Rename the phone: persists the new name, re-advertises on mDNS so
-     * desktops see the new identifier, and updates [deviceName] for any
-     * UI observers. The WebSocket server reads the name fresh on each
-     * use, so existing connections see the new name immediately too.
+     * Rename the phone: persists the new name, pushes DEVICE_RENAMED to
+     * every live desktop session so their UI updates in place, and
+     * re-advertises mDNS (the WebSocket server itself is NOT touched —
+     * heartbeats keep flowing and there is no rescan on the desktop).
+     *
+     * Desktops match the phone by `device_id`, which is immutable, so a
+     * rename never looks like a new device.
      */
     fun renameDevice(newName: String) {
         deviceNameStore.set(newName)
         val effective = deviceNameStore.get()
         _deviceName.value = effective
-        // Re-advertise so the new name shows up in desktop discovery.
-        advertiser.unregister()
+        // Notify any currently-connected desktops over the live socket
+        // so they update their "paired with X" banner instantly. Done
+        // BEFORE the mDNS bounce so the message goes out before the
+        // browse-side dedup window blinks.
+        server?.broadcastRename(deviceIdStore.get(), effective)
+        // Re-advertise so a fresh desktop launch sees the new name in
+        // discovery. mDNS instance name is device_id-derived, so this
+        // doesn't look like a different service to the desktop.
         if (server != null) {
-            advertiser.register(effective, DEFAULT_PORT)
+            advertiser.updateName(effective, deviceIdStore.get(), DEFAULT_PORT)
         }
         pushEvent("Renamed to \"$effective\"")
     }

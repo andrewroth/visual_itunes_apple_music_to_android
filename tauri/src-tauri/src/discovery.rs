@@ -19,6 +19,11 @@ use musicsync_core::protocol::{DEFAULT_PORT, MDNS_SERVICE_TYPE};
 #[derive(Serialize, Clone)]
 pub struct DiscoveryFoundEvent {
     pub ws_url: String,
+    /// Stable per-phone UUID. Empty string when the responder is an old
+    /// companion that doesn't advertise `id` yet — frontend treats that
+    /// as "match by name only" for backwards compat.
+    #[serde(default)]
+    pub device_id: String,
     pub device_name: String,
     pub host: String,
     pub port: u16,
@@ -121,12 +126,14 @@ pub fn start_lan_scan(app: AppHandle) {
             };
             let device_name = parsed.get("name").and_then(|v| v.as_str())
                 .unwrap_or("(unknown)").to_string();
+            let device_id = parsed.get("id").and_then(|v| v.as_str())
+                .unwrap_or("").to_string();
             let port = parsed.get("port").and_then(|v| v.as_u64())
                 .unwrap_or(DEFAULT_PORT as u64) as u16;
             let host = from.ip().to_string();
             let ws_url = format!("ws://{host}:{port}");
             let _ = app.emit("discovery_found", DiscoveryFoundEvent {
-                ws_url, device_name, host, port,
+                ws_url, device_id, device_name, host, port,
             });
         }
         tracing::info!("UDP discovery done");
@@ -176,10 +183,14 @@ pub fn start_browse(app: AppHandle) {
                         .unwrap_or_else(|| {
                             info.get_hostname().trim_end_matches('.').to_string()
                         });
+                    let device_id = info
+                        .get_property_val_str("id")
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
                     let ws_url = format!("ws://{host}:{port}");
                     let _ = app.emit(
                         "discovery_found",
-                        DiscoveryFoundEvent { ws_url, device_name, host, port },
+                        DiscoveryFoundEvent { ws_url, device_id, device_name, host, port },
                     );
                 }
                 _ => continue, // other event types — ignore

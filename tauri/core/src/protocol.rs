@@ -7,7 +7,7 @@
 //!
 //! Sequence:
 //!   client → HELLO {token, protocol_version}
-//!   server → HELLO_OK {device_name, music_root, protocol_version}
+//!   server → HELLO_OK {device_id, device_name, music_root, protocol_version}
 //!   client → MANIFEST_REQUEST
 //!   server → MANIFEST {files, playlists}
 //!   client → FILE_PUT {path, size}, then a binary frame of `size` bytes
@@ -77,19 +77,41 @@ pub enum ClientMessage {
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ServerMessage {
     HelloOk {
+        /// Stable per-phone UUID (v4). This is the real identity used by
+        /// the desktop for pairing-match, dedup, and ignored-devices.
+        /// Empty string only when talking to a pre-`device_id` companion.
+        #[serde(default)]
+        device_id: String,
         device_name: String,
         music_root: String,
         protocol_version: u32,
     },
     /// 6-digit comparison code. Both sides display it; the user verifies
     /// the same digits appear on both screens before tapping Confirm.
-    PairChallenge { code: String, device_name: String },
+    PairChallenge {
+        code: String,
+        #[serde(default)]
+        device_id: String,
+        device_name: String,
+    },
     /// Echo of the desktop's announced identity so the user has feedback
     /// on which machine just connected (for log lines etc.). Optional.
     PairPeerInfo { desktop_user: String, desktop_host: String },
     /// Pairing succeeded. `token` is the persistent secret the desktop
-    /// should store and send in HELLO from now on.
-    PairOk { token: String, device_name: String, music_root: String },
+    /// should store and send in HELLO from now on. `device_id` is the
+    /// stable UUID the desktop should use as the durable peer identity
+    /// (name is a mutable display label).
+    PairOk {
+        token: String,
+        #[serde(default)]
+        device_id: String,
+        device_name: String,
+        music_root: String,
+    },
+    /// Pushed by the phone when the user changes the device's display
+    /// name. The desktop updates its label without re-scanning or
+    /// reconnecting; matching is by `device_id`, not by name.
+    DeviceRenamed { device_id: String, device_name: String },
     /// Pairing aborted (timeout, user cancelled on the phone, or other).
     PairCancelled { reason: String },
     Manifest {
@@ -170,6 +192,32 @@ mod tests {
         assert!(j.contains("#EXTM3U"));
         let back: ServerMessage = serde_json::from_str(&j).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn device_renamed_roundtrips() {
+        let m = ServerMessage::DeviceRenamed {
+            device_id: "11111111-2222-3333-4444-555555555555".into(),
+            device_name: "Pixel 7 (kitchen)".into(),
+        };
+        let j = serde_json::to_string(&m).unwrap();
+        assert!(j.contains("\"kind\":\"DEVICE_RENAMED\""));
+        let back: ServerMessage = serde_json::from_str(&j).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn hello_ok_accepts_legacy_payload_without_device_id() {
+        // Older companions don't yet send device_id; we must tolerate it.
+        let j = r#"{"kind":"HELLO_OK","device_name":"Pixel","music_root":"/sdcard/Music/","protocol_version":1}"#;
+        let back: ServerMessage = serde_json::from_str(j).unwrap();
+        match back {
+            ServerMessage::HelloOk { device_id, device_name, .. } => {
+                assert_eq!(device_id, "");
+                assert_eq!(device_name, "Pixel");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
