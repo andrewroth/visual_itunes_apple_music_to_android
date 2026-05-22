@@ -12,6 +12,14 @@ Scans music files via companion app and tansfers only what's needed based on sel
 
 [Latest release →](../../releases)
 
-## Build
+## Instructions
 
-`tauri/` (desktop) · `android/` (companion) · `PROTOCOL.md` (wire format)
+1. Export your iTunes/Apple Music library. Library -> Export Library...
+2. Run the desktop app, browse for your saved export 
+3. Install and run the android app. Choose music directory.
+4. Be on the same network as the desktop app and allow access on the app
+   once the desktop connects. If it doesn't auto-detect, you can try a
+   manual connect.
+5. Choose playlists you want copied to the android device by clicking on
+   a playlist row in the desktop app.
+6. Hit Sync Now
