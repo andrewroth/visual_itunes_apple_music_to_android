@@ -459,9 +459,10 @@
     </div>
 
     <!-- Progress bar pinned to the very bottom. The body's bottom padding
-         (in styles.css) keeps it off the window edge. -->
-    <div class="col-12 px-2">
-      <div class="progress">
+         (in styles.css) keeps it off the window edge. The ETA chip
+         floats to the right of the bar while a sync is in flight. -->
+    <div class="col-12 px-2 d-flex align-items-center gap-2">
+      <div class="progress flex-grow-1">
         <div
           id="progress"
           class="progress-bar"
@@ -469,6 +470,7 @@
           style="width: 0%"
         ></div>
       </div>
+      <small id="progress_eta" class="text-muted" style="display: none; min-width: 8em; text-align: right; font-variant-numeric: tabular-nums"></small>
     </div>
   </body>
 </html>

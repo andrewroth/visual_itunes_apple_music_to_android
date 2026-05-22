@@ -18,7 +18,17 @@ use crate::track::Track;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Playlist {
     pub name: String,
+    /// iTunes `Playlist ID` (integer, e.g. "5394"). VOLATILE: renumbered
+    /// on any library rebuild / iTunes→Music migration. Kept around only
+    /// so legacy settings.yml files (which stored these) can still match
+    /// during is_playlist_checked.
     pub playlist_id: String,
+    /// iTunes `Playlist Persistent ID` (16-char hex, e.g. "A1B2C3D4E5F60718").
+    /// STABLE across exports and library rebuilds — used as the durable
+    /// identity for checked_playlist_ids, cleanup_playlist_ids, and the
+    /// remembered_playlists list.
+    #[serde(default)]
+    pub persistent_id: String,
     pub track_ids: Vec<String>,
     #[serde(default)]
     pub checked: bool,
@@ -92,6 +102,7 @@ mod tests {
         let p = Playlist {
             name: "Test".into(),
             playlist_id: "1".into(),
+            persistent_id: "PID1".into(),
             track_ids: vec!["10".into(), "11".into()],
             checked: true,
         };
@@ -113,6 +124,7 @@ mod tests {
         let p = Playlist {
             name: "Empty".into(),
             playlist_id: "1".into(),
+            persistent_id: "PID1".into(),
             track_ids: vec![],
             checked: false,
         };
@@ -124,6 +136,7 @@ mod tests {
         let p = Playlist {
             name: "P".into(),
             playlist_id: "1".into(),
+            persistent_id: "PID1".into(),
             track_ids: vec!["10".into(), "missing".into(), "11".into()],
             checked: false,
         };
@@ -165,6 +178,7 @@ mod tests {
         let p = Playlist {
             name: "Favourites".into(),
             playlist_id: "1".into(),
+            persistent_id: "PID1".into(),
             track_ids: vec![],
             checked: false,
         };

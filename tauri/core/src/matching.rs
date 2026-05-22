@@ -194,12 +194,14 @@ mod tests {
         let p1 = crate::playlist::Playlist {
             name: "P1".into(),
             playlist_id: "p1".into(),
+            persistent_id: "PID-P1".into(),
             track_ids: vec!["1".into(), "2".into()],
             checked: true,
         };
         let p2 = crate::playlist::Playlist {
             name: "P2".into(),
             playlist_id: "p2".into(),
+            persistent_id: "PID-P2".into(),
             track_ids: vec!["2".into(), "3".into(), "1".into()],
             checked: true,
         };

@@ -262,7 +262,7 @@ fn toggle_playlist(
             .ok_or_else(|| "library not loaded".to_string())?;
         let mut name: Option<String> = None;
         for p in &mut lib.playlists {
-            if p.playlist_id == playlist_id {
+            if p.persistent_id == playlist_id {
                 p.checked = !p.checked;
                 name = Some(p.name.clone());
             }
@@ -271,15 +271,15 @@ fn toggle_playlist(
         currently_checked = lib
             .playlists
             .iter()
-            .find(|p| p.playlist_id == playlist_id)
+            .find(|p| p.persistent_id == playlist_id)
             .map(|p| p.checked)
             .unwrap_or(false);
-        library_ids = lib.playlists.iter().map(|p| p.playlist_id.clone()).collect();
+        library_ids = lib.playlists.iter().map(|p| p.persistent_id.clone()).collect();
         checked_ids_in_library = lib
             .playlists
             .iter()
             .filter(|p| p.checked)
-            .map(|p| p.playlist_id.clone())
+            .map(|p| p.persistent_id.clone())
             .collect();
     }
 
@@ -444,20 +444,20 @@ fn build_views_with_scan(
             } else { None };
 
             PlaylistView {
-                playlist_id: p.playlist_id.clone(),
+                playlist_id: p.persistent_id.clone(),
                 name: p.name.clone(),
                 track_count: p.track_ids.len(),
                 device_tracks_count: device_count,
                 tracks_to_copy: to_copy,
                 checked: p.checked,
                 cleanup_count,
-                cleanup_checked: cleanup_flagged.contains(p.playlist_id.as_str()),
+                cleanup_checked: cleanup_flagged.contains(p.persistent_id.as_str()),
             }
         })
         .collect();
 
     let library_ids: std::collections::HashSet<&str> =
-        lib.playlists.iter().map(|p| p.playlist_id.as_str()).collect();
+        lib.playlists.iter().map(|p| p.persistent_id.as_str()).collect();
     let missing = settings
         .remembered_playlists
         .iter()
@@ -547,7 +547,7 @@ async fn run_sync(
             })
             .unwrap_or_default();
         for p in &lib.playlists {
-            if !cleanup_ids.contains(p.playlist_id.as_str()) { continue; }
+            if !cleanup_ids.contains(p.persistent_id.as_str()) { continue; }
             for tid in &p.track_ids {
                 if checked_track_ids.contains(tid.as_str()) { continue; }
                 if let Some(t) = lib.tracks.get(tid) {
@@ -2073,7 +2073,7 @@ fn compute_preview(
         .collect();
 
     let library_ids: std::collections::HashSet<&str> =
-        lib.playlists.iter().map(|p| p.playlist_id.as_str()).collect();
+        lib.playlists.iter().map(|p| p.persistent_id.as_str()).collect();
     let remove_playlist_items: Vec<PreviewPlaylist> = settings
         .remembered_playlists
         .iter()
@@ -2109,7 +2109,7 @@ fn compute_preview(
         }
     }
     for p in &lib.playlists {
-        if !cleanup_ids.contains(p.playlist_id.as_str()) { continue; }
+        if !cleanup_ids.contains(p.persistent_id.as_str()) { continue; }
         for tid in &p.track_ids {
             if checked_track_ids.contains(tid.as_str()) { continue; }
             if let Some(t) = lib.tracks.get(tid) {

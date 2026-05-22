@@ -208,10 +208,23 @@ impl Settings {
         Ok(Self::default())
     }
 
-    pub fn is_playlist_checked(&self, id: &str, name: &str) -> bool {
-        self.checked_playlist_ids
-            .iter()
-            .any(|v| v == id || v == name)
+    /// True if any stored entry in `checked_playlist_ids` matches the
+    /// playlist's stable persistent ID, its volatile integer Playlist ID,
+    /// or its display name. The three-tier fallback is what keeps
+    /// settings files written by older versions (which stored the
+    /// integer ID, or in some cases the name) still working after the
+    /// switch to persistent IDs as the primary identity.
+    pub fn is_playlist_checked(
+        &self,
+        persistent_id: &str,
+        playlist_id: &str,
+        name: &str,
+    ) -> bool {
+        self.checked_playlist_ids.iter().any(|v| {
+            (!persistent_id.is_empty() && v == persistent_id)
+                || v == playlist_id
+                || v == name
+        })
     }
 
     pub fn set_checked_playlist_ids(&mut self, ids: Vec<String>) {
@@ -293,12 +306,25 @@ mod tests {
     }
 
     #[test]
-    fn is_playlist_checked_matches_id_or_name() {
+    fn is_playlist_checked_matches_any_of_persistent_id_id_or_name() {
         let mut s = Settings::default();
-        s.checked_playlist_ids = vec!["106".into(), "My Playlist".into()];
-        assert!(s.is_playlist_checked("106", "Anything"));
-        assert!(s.is_playlist_checked("999", "My Playlist"));
-        assert!(!s.is_playlist_checked("999", "Other"));
+        s.checked_playlist_ids = vec![
+            "A1B2C3D4E5F60718".into(), // persistent id
+            "106".into(),              // legacy integer id
+            "My Playlist".into(),      // name
+        ];
+        // Persistent-id match (the durable identity).
+        assert!(s.is_playlist_checked("A1B2C3D4E5F60718", "5394", "Workout"));
+        // Legacy integer-id match (old settings still recognised).
+        assert!(s.is_playlist_checked("DEADBEEF", "106", "Anything"));
+        // Name fallback (Ruby-era / hand-written YAML).
+        assert!(s.is_playlist_checked("DEADBEEF", "999", "My Playlist"));
+        // No match at all.
+        assert!(!s.is_playlist_checked("DEADBEEF", "999", "Other"));
+        // Empty persistent_id should NOT spuriously match an empty-string
+        // entry (guard against XML imports without persistent IDs).
+        s.checked_playlist_ids = vec!["".into()];
+        assert!(!s.is_playlist_checked("", "123", "X"));
     }
 
     #[test]

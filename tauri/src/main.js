@@ -94,6 +94,7 @@ listen("scan_progress", (e) => {
     const pct = Math.round(fraction * 100);
     verboseLog(`scan_progress updating bar width to ${pct}%`);
     $("progress").style.width = `${pct}%`;
+    updateEta(fraction);
   } else {
     verboseLog("scan_progress had no numeric fraction; leaving bar width unchanged");
   }
@@ -104,6 +105,9 @@ listen("scan_complete", (e) => {
     "success",
     `Scan complete, ready to copy. (${files} tracks, ${playlists} playlists)`,
   );
+  // Re-anchor the ETA so the copy phase isn't extrapolated from the
+  // (much faster) scan rate.
+  resetEta();
 });
 
 // Update the right-hand status banner with a typed message. Use this
@@ -602,6 +606,7 @@ async function scanDevice() {
   try {
     setStatusMessage("info", "Scanning...");
     appendLog("Scanning phone for current file list…");
+    resetEta();
     const result = await invoke("scan_device", { wsUrl });
     lastScan = result;
     appendLog(
@@ -630,6 +635,7 @@ listen("sync_started", () => {
   stop.style.display = "";
   stop.removeAttribute("disabled");
   stop.textContent = "Stop sync";
+  resetEta();
 });
 listen("sync_ended", () => {
   const stop = $("stop_sync");
@@ -637,7 +643,71 @@ listen("sync_ended", () => {
   stop.removeAttribute("disabled");
   stop.textContent = "Stop sync";
   $("sync").style.display = "";
+  hideEta();
 });
+
+// ----- ETA -----
+// Timestamp (ms) of the first non-zero progress fraction we see in the
+// current sync. Used as the anchor for the linear extrapolation in
+// updateEta(). Reset on sync_started so a new run computes fresh.
+let etaStartMs = null;
+let etaStartFraction = null;
+
+function resetEta() {
+  etaStartMs = null;
+  etaStartFraction = null;
+  const el = $("progress_eta");
+  if (el) {
+    el.textContent = "";
+    el.style.display = "none";
+  }
+}
+
+function hideEta() {
+  const el = $("progress_eta");
+  if (el) el.style.display = "none";
+}
+
+// Format milliseconds as HH:MM, capped at 99:59 for sanity. Returns
+// "<1m" for anything under one minute so the chip doesn't say 00:00.
+function formatHhMm(ms) {
+  if (!isFinite(ms) || ms < 0) return "";
+  const totalMinutes = Math.round(ms / 60000);
+  if (totalMinutes < 1) return "<1m";
+  const hh = Math.min(99, Math.floor(totalMinutes / 60));
+  const mm = totalMinutes % 60;
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+// Linear extrapolation: assume progress rate from the first non-zero
+// fraction we saw is representative. Cheap and reasonable for the
+// dominant cost (file uploads on a steady WiFi link).
+function updateEta(fraction) {
+  const el = $("progress_eta");
+  if (!el) return;
+  if (typeof fraction !== "number" || fraction <= 0 || fraction >= 1) {
+    el.style.display = "none";
+    return;
+  }
+  const now = Date.now();
+  if (etaStartMs == null) {
+    etaStartMs = now;
+    etaStartFraction = fraction;
+    return; // need at least one delta to extrapolate
+  }
+  const elapsed = now - etaStartMs;
+  const progressed = fraction - etaStartFraction;
+  if (progressed <= 0 || elapsed <= 0) return;
+  const remainingFraction = 1 - fraction;
+  const eta = elapsed * (remainingFraction / progressed);
+  const label = formatHhMm(eta);
+  if (!label) {
+    el.style.display = "none";
+    return;
+  }
+  el.textContent = `~${label} left`;
+  el.style.display = "";
+}
 
 async function stopSync() {
   const ok = window.confirm(
@@ -682,6 +752,7 @@ listen("progress", (e) => {
     const pct = Math.round(fraction * 100);
     verboseLog(`progress updating bar width to ${pct}%`);
     $("progress").style.width = `${pct}%`;
+    updateEta(fraction);
   } else {
     verboseLog("progress had no numeric fraction; leaving bar width unchanged");
   }

@@ -324,7 +324,11 @@ fn parse_playlists_array(
             Event::Start(e) if e.name().as_ref() == b"dict" => {
                 let pl = parse_one_playlist(reader, tracks)?;
                 if let Some(mut pl) = pl {
-                    pl.checked = settings.is_playlist_checked(&pl.playlist_id, &pl.name);
+                    pl.checked = settings.is_playlist_checked(
+                        &pl.persistent_id,
+                        &pl.playlist_id,
+                        &pl.name,
+                    );
                     playlists.push(pl);
                 }
             }
@@ -342,6 +346,7 @@ fn parse_one_playlist(
 ) -> Result<Option<Playlist>> {
     let mut name: Option<String> = None;
     let mut playlist_id: Option<String> = None;
+    let mut persistent_id: Option<String> = None;
     let mut track_ids: Option<Vec<String>> = None;
     let mut current_key: Option<String> = None;
     let mut buf = Vec::new();
@@ -354,7 +359,11 @@ fn parse_one_playlist(
                     "key" => current_key = Some(read_text(reader, "key")?),
                     "string" => {
                         let v = read_text(reader, "string")?;
-                        if current_key.as_deref() == Some("Name") { name = Some(v); }
+                        match current_key.as_deref() {
+                            Some("Name") => name = Some(v),
+                            Some("Playlist Persistent ID") => persistent_id = Some(v),
+                            _ => {}
+                        }
                         current_key = None;
                     }
                     "integer" => {
@@ -398,7 +407,20 @@ fn parse_one_playlist(
     // (e.g. movies, removed media). Matches Ruby `track_ids.select!`.
     track_ids.retain(|id| tracks.contains_key(id));
 
-    Ok(Some(Playlist { name, playlist_id, track_ids, checked: false }))
+    // Fall back to the integer Playlist ID when the XML doesn't carry a
+    // Persistent ID (very old iTunes versions, hand-crafted fixtures).
+    // The rest of the app then uses `persistent_id` as the single
+    // identity field without special-casing the empty value, and
+    // legacy settings keep matching via the three-tier fallback in
+    // is_playlist_checked.
+    let persistent_id = persistent_id.unwrap_or_else(|| playlist_id.clone());
+    Ok(Some(Playlist {
+        name,
+        playlist_id,
+        persistent_id,
+        track_ids,
+        checked: false,
+    }))
 }
 
 /// Parse the array of Playlist Items, each of which is
@@ -482,6 +504,7 @@ mod tests {
         <dict>
             <key>Name</key><string>My Playlist</string>
             <key>Playlist ID</key><integer>100</integer>
+            <key>Playlist Persistent ID</key><string>A1B2C3D4E5F60718</string>
             <key>Playlist Items</key>
             <array>
                 <dict><key>Track ID</key><integer>10</integer></dict>
@@ -520,6 +543,7 @@ mod tests {
         let p = &lib.playlists[0];
         assert_eq!(p.name, "My Playlist");
         assert_eq!(p.playlist_id, "100");
+        assert_eq!(p.persistent_id, "A1B2C3D4E5F60718");
         // Track 12 referenced in items but absent from Tracks dict — filtered.
         assert_eq!(p.track_ids, vec!["10".to_string(), "11".to_string()]);
         assert!(!p.checked);
@@ -539,5 +563,13 @@ mod tests {
         s.checked_playlist_ids = vec!["My Playlist".into()];
         let lib = Library::parse_xml(MINIMAL_XML, "/sdcard/Music/", &s).expect("parse");
         assert!(lib.playlists[0].checked, "name-based match should set checked");
+    }
+
+    #[test]
+    fn checked_state_picks_up_from_settings_by_persistent_id() {
+        let mut s = Settings::default();
+        s.checked_playlist_ids = vec!["A1B2C3D4E5F60718".into()];
+        let lib = Library::parse_xml(MINIMAL_XML, "/sdcard/Music/", &s).expect("parse");
+        assert!(lib.playlists[0].checked, "persistent-id match should set checked");
     }
 }
