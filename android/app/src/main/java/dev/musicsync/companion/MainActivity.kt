@@ -139,7 +139,20 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 @OptIn(ExperimentalMaterial3Api::class)
                 Scaffold(
-                    topBar = { TopAppBar(title = { BrandTitle() }) },
+                    topBar = {
+                        TopAppBar(
+                            title = { BrandTitle() },
+                            actions = {
+                                Image(
+                                    painter = painterResource(id = R.drawable.logo),
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(end = 12.dp)
+                                        .height(30.dp),
+                                )
+                            },
+                        )
+                    },
                 ) { padding ->
                     Column(
                         modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize(),
@@ -310,18 +323,10 @@ private fun BrandTitle() {
             "Viamta Music Sync",
             fontWeight = FontWeight.SemiBold,
         )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                subtitleAnnotated,
-                fontSize = 10.sp,
-            )
-            Spacer(Modifier.width(6.dp))
-            Image(
-                painter = painterResource(id = R.drawable.logo),
-                contentDescription = null,
-                modifier = Modifier.height(30.dp),
-            )
-        }
+        Text(
+            subtitleAnnotated,
+            fontSize = 10.sp,
+        )
     }
 }
 

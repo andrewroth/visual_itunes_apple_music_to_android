@@ -60,6 +60,25 @@ impl Track {
         }
     }
 
+    /// Replace the music-root prefix of [`device_path`] in place. Used when
+    /// the phone reports a new music_root in HELLO_OK that differs from the
+    /// one we baked into device_path at library-parse time (e.g. the user
+    /// changed the music folder on the phone after pairing). Trailing
+    /// slashes on either root are tolerated.
+    ///
+    /// No-op if `device_path` doesn't begin with `old_root` — we'd rather
+    /// leave a stale path that will fail loudly than rewrite something we
+    /// don't understand.
+    pub fn rebase_device_path(&mut self, old_root: &str, new_root: &str) {
+        let old = old_root.trim_end_matches('/');
+        let new = new_root.trim_end_matches('/');
+        if old == new { return; }
+        if let Some(rest) = self.device_path.strip_prefix(old) {
+            // `rest` starts with '/' for normal paths; preserve it.
+            self.device_path = format!("{new}{rest}");
+        }
+    }
+
     /// The path written into a .m3u file. Matches Ruby's `playlist_path`:
     /// device_path with the base music root prefix stripped, and any leading
     /// `/` removed.
@@ -201,6 +220,39 @@ mod tests {
             t.playlist_path("/sdcard/Music"),
             "Artist/Album/Track.mp3"
         );
+    }
+
+    #[test]
+    fn rebase_device_path_swaps_root_prefix() {
+        let mut t = Track {
+            id: "1".into(),
+            name: "x".into(),
+            artist: "".into(),
+            size: 0,
+            local_path: "".into(),
+            device_path: "/storage/27A4-F248/Music/Artist/Album/Track.mp3".into(),
+            on_device: false,
+        };
+        t.rebase_device_path("/storage/27A4-F248/Music/", "/storage/27A4-F248/Music Test/");
+        assert_eq!(
+            t.device_path,
+            "/storage/27A4-F248/Music Test/Artist/Album/Track.mp3",
+        );
+    }
+
+    #[test]
+    fn rebase_device_path_noop_when_prefix_mismatch() {
+        let mut t = Track {
+            id: "1".into(),
+            name: "x".into(),
+            artist: "".into(),
+            size: 0,
+            local_path: "".into(),
+            device_path: "/sdcard/Music/A/B.mp3".into(),
+            on_device: false,
+        };
+        t.rebase_device_path("/storage/27A4-F248/Music/", "/storage/27A4-F248/Music Test/");
+        assert_eq!(t.device_path, "/sdcard/Music/A/B.mp3");
     }
 
     #[test]

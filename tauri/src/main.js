@@ -622,12 +622,20 @@ async function scanDevice() {
 
 // Sync lifecycle: backend emits sync_started/sync_ended around each
 // run_sync. The Stop button is only useful (and only visible) in between.
+// Reset the "Aborting…" pending state on every fresh sync so it doesn't
+// stick around if the user starts a new sync after a prior abort.
 listen("sync_started", () => {
   $("sync").style.display = "none";
-  $("stop_sync").style.display = "";
+  const stop = $("stop_sync");
+  stop.style.display = "";
+  stop.removeAttribute("disabled");
+  stop.textContent = "Stop sync";
 });
 listen("sync_ended", () => {
-  $("stop_sync").style.display = "none";
+  const stop = $("stop_sync");
+  stop.style.display = "none";
+  stop.removeAttribute("disabled");
+  stop.textContent = "Stop sync";
   $("sync").style.display = "";
 });
 
@@ -638,11 +646,21 @@ async function stopSync() {
     "what's still missing and pick up where this one left off."
   );
   if (!ok) return;
+  // Immediate visual feedback. The backend's abort_flag is only checked
+  // between file boundaries, so there's an inherent delay before
+  // sync_ended fires — we don't want the user clicking Stop repeatedly
+  // wondering if it registered.
+  const stop = $("stop_sync");
+  stop.setAttribute("disabled", "true");
+  stop.textContent = "Aborting…";
   try {
     await invoke("abort_sync");
     appendLog("Stop requested — current sync will exit at the next file boundary.");
   } catch (e) {
     appendLog(`Abort failed: ${e}`);
+    // Roll back the visual state so the user can retry.
+    stop.removeAttribute("disabled");
+    stop.textContent = "Stop sync";
   }
 }
 

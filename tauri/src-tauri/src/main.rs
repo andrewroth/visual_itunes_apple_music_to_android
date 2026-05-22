@@ -987,8 +987,33 @@ async fn scan_device(
         timestamp_ms,
     };
 
+    // If the phone now reports a music_root that differs from what we
+    // baked into Track.device_path values (settings.ftp_path), rebase
+    // every track in place so subsequent uploads send relative paths
+    // that match the phone's current root. Persist the new ftp_path so
+    // future scan/sync runs and a fresh app start see the same value.
+    let mut settings_to_save: Option<(Settings, std::path::PathBuf)> = None;
     {
         let mut guard = state.lock().unwrap();
+        let old_root = guard.settings.ftp_path.clone().unwrap_or_default();
+        let root_changed = !old_root.is_empty() && old_root != music_root;
+        if root_changed {
+            if let Some(lib) = guard.library.as_mut() {
+                for t in lib.tracks.values_mut() {
+                    t.rebase_device_path(&old_root, &music_root);
+                }
+            }
+            for t in tracks_clone.values_mut() {
+                t.rebase_device_path(&old_root, &music_root);
+            }
+            guard.settings.ftp_path = Some(music_root.clone());
+            settings_to_save = Some((guard.settings.clone(), guard.settings_path.clone()));
+            vlog(&app, verbose, format!(
+                "music_root changed: was {old_root:?}, now {music_root:?} — rebased {} tracks",
+                tracks_clone.len(),
+            ));
+        }
+
         guard.last_scan = Some(LastScan {
             device_files,
             unused_device_paths: unused_paths,
@@ -1005,6 +1030,9 @@ async fn scan_device(
                 }
             }
         }
+    }
+    if let Some((settings, path)) = settings_to_save {
+        let _ = settings.save(&path);
     }
 
     Ok(result)
