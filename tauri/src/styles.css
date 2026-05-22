@@ -1,0 +1,53 @@
+/* Layout: fill the window with a flex column so the bottom progress bar
+   always sits at the bottom and the playlist table grows to fill the
+   middle. The original layout had a fixed 280px scroll area and left
+   empty space under the progress bar on tall windows. */
+html, body {
+  height: 100vh;
+  margin: 0;
+  overflow: hidden; /* the flex column handles its own scrolling */
+}
+body {
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+  /* Inner padding for breathing room. The bottom value is intentionally
+     larger so the progress bar sits a bit above the window edge. The
+     Bootstrap m-1 class from the body's class list was adding outer
+     margin that broke the 100vh budget — overflow:hidden above plus
+     this padding replaces it cleanly. */
+  padding: 4px 8px 24px 8px;
+}
+body > .nav-tabs { flex-shrink: 0; }
+body > hr,
+body > .col-12 { flex-shrink: 0; }
+
+/* The tab-content host gets the flexible middle slot. Inside it, the
+   active pane is itself a flex column so its own contents (form, banners,
+   table, buttons) can flow naturally with the table expanding. */
+body > .tab-content {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+body > .tab-content > .tab-pane.show.active {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#log div { white-space: pre-wrap; }
+#playlists tbody tr { cursor: pointer; user-select: none; }
+
+/* Sync/Stop buttons don't shrink below a fixed width when the status
+   banner alongside them is long. */
+#sync, #stop_sync { min-width: 125px; }
+
+/* The readonly library path field gets the standard "disabled" grey
+   so it visually reads as locked. Click Browse to change it. */
+#library_path[readonly] {
+  background-color: #e9ecef;
+}

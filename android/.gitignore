@@ -1,0 +1,36 @@
+# Gradle
+.gradle/
+build/
+**/build/
+captures/
+.kotlin/
+
+# Wrapper jar gets re-downloaded by gradlew on first run, so excluding
+# it keeps the repo lean. (Some teams commit it; we don't.)
+gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.cxx/
+
+# Local-only SDK paths + signing config
+local.properties
+keystore.properties
+*.jks
+*.keystore
+
+# Generated APK output trees
+app/release/
+app/debug/
+
+# OS junk
+.DS_Store
+
+# Dev helper logs / personal credentials
+*.log
+ftp-creds.sh
+
+# Local-machine APK upload helper with hardcoded FTP creds — not useful
+# to anyone but the local dev.
+ftp-upload-apk.sh

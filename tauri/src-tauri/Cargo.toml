@@ -1,0 +1,32 @@
+[package]
+name = "musicsync-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MusicSync desktop client"
+
+[[bin]]
+name = "musicsync"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+musicsync-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "fs", "time"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+mdns-sd = "0.11"
+if-addrs = "0.13"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

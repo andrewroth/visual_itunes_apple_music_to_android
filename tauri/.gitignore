@@ -1,0 +1,31 @@
+# Rust build output (~4-5 GB for this project — never commit).
+target/
+**/target/
+
+# Tauri-generated platform scaffolding + installer scratch
+src-tauri/gen/
+src-tauri/WixTools/
+
+# Cargo.lock for app binaries IS committed (reproducible builds).
+# Don't ignore it.
+
+# Node frontend deps + bundler caches (if/when added)
+node_modules/
+dist/
+.parcel-cache/
+.next/
+
+# OS junk
+.DS_Store
+*.swp
+*.swo
+
+# Local user state that lands here during development.
+Library.xml
+settings.yml
+settings.yml.works
+out.log
+*.log
+
+# Old UI iteration kept around locally; don't ship.
+backup/

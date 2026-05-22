@@ -1,0 +1,26 @@
+# OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Editor / IDE
+.idea/
+.vscode/
+*.iml
+
+# Project-specific runtime artefacts that shouldn't be checked in.
+# Each subproject has its own .gitignore for build outputs.
+out.log
+*.log
+
+# User-local data — never commit a real library or its derived caches.
+Library.xml
+settings.yml
+settings.yml.works
+cache.yml
+device_cache_key
+
+# Per-OS / per-user secrets
+.env
+.env.local

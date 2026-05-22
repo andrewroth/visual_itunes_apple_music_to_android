@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MusicSync</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <!-- Layout padding/margins live in styles.css now; m-1 was eating into
+       the 100vh budget and causing a stray scrollbar. -->
+  <body>
+    <script
+      src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+    ></script>
+    <script src="https://code.jquery.com/jquery-3.7.1.js"></script>
+    <!-- Sanity test: this inline script does NOT depend on the module
+         system. If you see "INLINE SCRIPT RAN" in DevTools console but no
+         "MusicSync frontend ... ready" line, then main.js's module imports
+         are failing and the file's execution never starts. -->
+    <script>
+      console.log("INLINE SCRIPT RAN — DevTools console is reachable.");
+      window.addEventListener("error", (e) => {
+        console.error("WINDOW ERROR:", e.message, e.filename, e.lineno);
+      });
+    </script>
+    <script type="module" src="main.js"></script>
+
+    <ul class="nav nav-tabs mb-2" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link active"
+          data-bs-toggle="tab"
+          data-bs-target="#home"
+          type="button"
+          role="tab"
+        >
+          Main
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link"
+          data-bs-toggle="tab"
+          data-bs-target="#logtab"
+          type="button"
+          role="tab"
+        >
+          Log
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link"
+          data-bs-toggle="tab"
+          data-bs-target="#abouttab"
+          type="button"
+          role="tab"
+        >
+          About
+        </button>
+      </li>
+    </ul>
+
+    <div class="tab-content px-2">
+      <div class="tab-pane fade show active" id="home" role="tabpanel">
+        <form id="settings">
+          <!-- Two equal-width blocks side by side: Library XML on the
+               left, Android Device on the right. Each has its label above
+               its controls; the right block stacks the address row and a
+               Forget-pairing affordance underneath. -->
+          <div class="row pb-1">
+            <div class="col-6">
+              <label
+                for="library_path"
+                class="form-label form-label-sm mb-1"
+                >Library XML</label
+              >
+              <div class="input-group input-group-sm">
+                <input
+                  type="text"
+                  class="form-control form-control-sm"
+                  id="library_path"
+                  name="library_path"
+                  readonly
+                />
+                <button
+                  type="button"
+                  id="library_path_browse"
+                  class="btn border bg-white text-dark"
+                >
+                  Browse…
+                </button>
+              </div>
+            </div>
+            <div class="col-6">
+              <label class="form-label form-label-sm mb-1">Android Device</label>
+              <!-- Bootstrap input-group glues the address display and the
+                   action buttons into a single attached control. Forget
+                   pairing sits at the far right; hidden when no pairing
+                   exists so the address spans the full width. -->
+              <div class="input-group input-group-sm">
+                <span
+                  id="ws_url_display"
+                  class="form-control form-control-sm"
+                  style="background:#f7f7f7"
+                ></span>
+                <input
+                  type="text"
+                  class="form-control form-control-sm"
+                  id="ws_url"
+                  name="ws_url"
+                  placeholder="ws://192.168.0.10:7800"
+                  style="display: none"
+                />
+                <button
+                  type="button"
+                  id="ws_url_edit"
+                  class="btn border bg-white text-dark"
+                  style="white-space: nowrap"
+                >
+                  Enter manually
+                </button>
+                <button
+                  type="button"
+                  id="ws_url_save"
+                  class="btn btn-success"
+                  style="display: none; white-space: nowrap"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  id="ws_url_cancel"
+                  class="btn btn-secondary"
+                  style="display: none; white-space: nowrap"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  id="forget_pairing_btn"
+                  class="btn border bg-white text-dark"
+                  style="display: none; white-space: nowrap"
+                  title="View paired phones and remove individual entries."
+                >
+                  Approvals…
+                </button>
+              </div>
+            </div>
+          </div>
+          <!-- The device music root is whatever the phone reports in
+               HELLO_OK; the user manages it from the phone's UI. Kept as a
+               hidden field so existing JS that reads/writes ftp_path keeps
+               working without changes. -->
+          <input type="hidden" id="ftp_path" name="ftp_path" />
+        </form>
+
+        <!-- Persistent status banners. paired_banner is shown whenever a
+             device_token is set in settings (we have a paired phone).
+             scan_banner toggles between scanning / complete (with counts +
+             timestamp) once a sync session starts. The library summary
+             lives in the #status alert further down the page. -->
+        <div
+          id="paired_banner"
+          class="alert alert-secondary py-2 px-3 mb-2"
+          style="display: none"
+        ></div>
+
+        <div class="col-12 pt-2 d-flex flex-column" style="flex: 1 1 auto; min-height: 0">
+          <div id="playlists_scroll" style="overflow-y: auto; flex: 1 1 auto; min-height: 100px">
+            <table
+              id="playlists"
+              class="table table-hover shadow-sm p-3 mb-3 bg-body rounded"
+            >
+              <thead>
+                <tr class="table-primary">
+                  <td>Copy</td>
+                  <td>Name</td>
+                  <td># Tracks</td>
+                  <td>Device # Tracks</td>
+                  <td>Delete</td>
+                  <td>Tracks To Copy</td>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <!-- Missing-playlists section. Populated by renderPlaylists()
+               from library.missing_playlists; hidden when empty. -->
+          <div id="missing_playlists_section" style="display: none">
+            <h6 class="mt-2 mb-1 text-muted">
+              Previously selected — no longer in library
+              <span
+                class="badge bg-secondary"
+                title="These playlists used to be in your Library.xml but no longer are. They stay remembered: if a playlist with the same ID reappears it will be auto-checked. Use Forget to remove from this list."
+                >?</span
+              >
+            </h6>
+            <table class="table table-sm mb-3">
+              <thead>
+                <tr class="table-secondary">
+                  <td>Name</td>
+                  <td>If still on phone…</td>
+                  <td></td>
+                </tr>
+              </thead>
+              <tbody id="missing_playlists_body"></tbody>
+            </table>
+          </div>
+        </div>
+        <!-- Bottom row: Sync button + the library/status banner inline to
+             its right (fills remaining width). -->
+        <div class="d-flex align-items-center mb-2">
+          <button
+            id="sync"
+            type="button"
+            class="btn btn-sm btn-primary me-1"
+            disabled
+            data-disabled-title="Sync becomes available once the paired phone has been contacted and a fresh scan completes."
+          >
+            Sync to Phone
+          </button>
+          <button
+            id="stop_sync"
+            type="button"
+            class="btn btn-sm btn-danger me-1"
+            style="display: none"
+          >
+            Stop sync
+          </button>
+          <div
+            id="status"
+            class="alert alert-info py-1 px-2 mb-0 flex-grow-1 ms-1"
+            style="min-height: 2em"
+          >
+            Idle — no library loaded.
+          </div>
+        </div>
+
+        <!-- Sync details modal: single table, one row per operation, with
+             a distinct background colour per operation type. -->
+        <div class="modal fade" id="sync_details_modal" tabindex="-1">
+          <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+              <div class="modal-header">
+                <h5 class="modal-title">Sync details</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+              </div>
+              <div class="modal-body">
+                <table class="table table-sm mb-0">
+                  <thead>
+                    <tr>
+                      <th style="width: 4em" class="text-end text-muted">#</th>
+                      <th style="width: 11em">Operation</th>
+                      <th style="width: 16em">Artist</th>
+                      <th>Item</th>
+                      <th style="width: 2em" title="Local file path on this desktop">💻</th>
+                      <th style="width: 2em" title="Path on the phone">📱</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sync_details_body"></tbody>
+                </table>
+              </div>
+              <div class="modal-footer">
+                <button
+                  type="button"
+                  class="btn btn-secondary"
+                  data-bs-dismiss="modal"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Manage Pairings modal. Lists currently-paired phones (one for
+             now; multi-pair on the desktop side is a future refactor). -->
+        <div
+          class="modal fade"
+          id="manage_pairings_modal"
+          tabindex="-1"
+        >
+          <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+              <div class="modal-header">
+                <h5 class="modal-title">Approvals</h5>
+              </div>
+              <div class="modal-body">
+                <ul id="manage_pairings_list" class="list-unstyled mb-0"></ul>
+              </div>
+              <div class="modal-footer">
+                <button
+                  type="button"
+                  class="btn btn-secondary"
+                  id="manage_pairings_close"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pre-sync confirm modal. Shown when Sync would do any deletes.
+             Cancel aborts; Confirm proceeds with the actual sync. -->
+        <div
+          class="modal fade"
+          id="confirm_sync_modal"
+          tabindex="-1"
+          data-bs-backdrop="static"
+        >
+          <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+              <div class="modal-header">
+                <h5 class="modal-title">Confirm deletions</h5>
+              </div>
+              <div class="modal-body">
+                <p>This sync will delete the following from the phone:</p>
+                <ul id="confirm_sync_list" class="mb-0"></ul>
+              </div>
+              <div class="modal-footer">
+                <button
+                  type="button"
+                  class="btn btn-secondary"
+                  id="confirm_sync_cancel"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-danger"
+                  id="confirm_sync_confirm"
+                >
+                  Delete and Sync
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pair confirmation modal. Hidden by default; shown when the
+             backend emits `pair_challenge`. Closes on Confirm or Cancel. -->
+        <div
+          class="modal fade"
+          id="pair_modal"
+          tabindex="-1"
+          data-bs-backdrop="static"
+          data-bs-keyboard="false"
+        >
+          <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+              <div class="modal-header">
+                <h5 class="modal-title">Pair with phone</h5>
+              </div>
+              <div class="modal-body text-center">
+                <p>
+                  Compare this code with the one shown on
+                  <strong id="pair_device_name">your phone</strong>:
+                </p>
+                <div
+                  id="pair_code"
+                  style="
+                    font-family: monospace;
+                    font-size: 3em;
+                    font-weight: bold;
+                    letter-spacing: 0.2em;
+                  "
+                >
+                  ------
+                </div>
+                <p class="text-muted small mt-2">
+                  Tap Confirm on both devices if the codes match.
+                </p>
+              </div>
+              <div class="modal-footer">
+                <button
+                  type="button"
+                  class="btn btn-secondary"
+                  id="pair_cancel_btn"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-primary"
+                  id="pair_confirm_btn"
+                >
+                  Confirm
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-pane fade" id="logtab" role="tabpanel">
+        <div
+          id="log"
+          style="max-height: 400px; overflow: scroll; font-family: monospace"
+        ></div>
+      </div>
+
+      <div class="tab-pane fade" id="abouttab" role="tabpanel">
+        <p class="mt-3">
+          MusicSync — sync your Music Library to an Android
+          phone running the MusicSync Companion app.
+        </p>
+        <p>
+          GPL-3.0. Source:
+          <code>github.com/andrewroth/ruby_itunes_apple_music_to_android</code>
+        </p>
+      </div>
+    </div>
+
+    <!-- Progress bar pinned to the very bottom. The body's bottom padding
+         (in styles.css) keeps it off the window edge. -->
+    <div class="col-12 px-2">
+      <div class="progress">
+        <div
+          id="progress"
+          class="progress-bar"
+          role="progressbar"
+          style="width: 0%"
+        ></div>
+      </div>
+    </div>
+  </body>
+</html>
