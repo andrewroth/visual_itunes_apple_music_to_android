@@ -93,12 +93,23 @@ pub struct Settings {
     #[serde(rename = "cleanup_playlist_ids", default)]
     pub cleanup_playlist_ids: Vec<String>,
 
-    /// When true, the backend emits very detailed per-track matching
-    /// logs to both the Log tab AND a dated file in the working dir
-    /// (`musicsync-YYYY-MM-DD.log`). Useful for diagnosing "this file
-    /// is on the phone but it's still trying to upload it" issues.
+    /// LEGACY: single combined flag. Kept readable so old settings files
+    /// don't silently lose state. New writes split this into the two
+    /// finer-grained flags below.
     #[serde(rename = "verbose_logging", default)]
     pub verbose_logging: bool,
+
+    /// When true, the backend emits sync-side detail (library/track
+    /// inventory, manifest dumps, MATCHED/MISSING per-track lines) to
+    /// the Log tab AND a dated file in the working dir.
+    #[serde(rename = "verbose_sync_logging", default)]
+    pub verbose_sync_logging: bool,
+
+    /// When true, the backend emits connection-side detail (heartbeat,
+    /// WS connect/auth, pair frames). Useful for diagnosing dropped or
+    /// slow phone connections without drowning in track-level logs.
+    #[serde(rename = "verbose_connection_logging", default)]
+    pub verbose_connection_logging: bool,
 
     /// Device names ("Pixel 7", "Galaxy S24") the user has explicitly
     /// rejected during pairing. mDNS hits matching any of these are
@@ -163,7 +174,17 @@ impl Settings {
     }
 
     pub fn from_yaml_str(yaml: &str) -> Result<Self> {
-        serde_yaml::from_str(yaml).context("failed to parse settings YAML")
+        let mut s: Self =
+            serde_yaml::from_str(yaml).context("failed to parse settings YAML")?;
+        // Carry the legacy single `verbose_logging` flag forward as both
+        // of the split categories so users who had it on don't lose
+        // their detail logging on upgrade. New writes emit the split
+        // fields, so the legacy flag goes dormant after one save.
+        if s.verbose_logging {
+            if !s.verbose_sync_logging { s.verbose_sync_logging = true; }
+            if !s.verbose_connection_logging { s.verbose_connection_logging = true; }
+        }
+        Ok(s)
     }
 
     pub fn load(path: &Path) -> Result<Self> {

@@ -206,7 +206,8 @@ fn load_library(app: AppHandle, state: State<Mutex<AppState>>) -> Result<Library
     let lib_path = std::path::PathBuf::from(&library_path);
     let mut lib = Library::parse_file(&lib_path, &device_root, &guard.settings)
         .map_err(|e| e.to_string())?;
-    let verbose = guard.settings.verbose_logging;
+    // Library inventory + manifest dumps are sync-side detail.
+    let verbose = guard.settings.verbose_sync_logging;
 
     // Re-apply the most recent device scan so on_device flags survive a
     // library reload. Without this, anything that triggers load_library
@@ -845,7 +846,7 @@ async fn scan_device(
     let progress_app = app.clone();
     let (device_files, device_playlists, music_root) =
         sync::fetch_manifest_full(&ws_url, &token, move |msg, fraction| {
-            vlog_dyn(
+            vlog_dyn_sync(
                 &progress_app,
                 format!(
                     "scan_progress recv from phone: message={msg:?} fraction={fraction:?}"
@@ -855,7 +856,7 @@ async fn scan_device(
                 "scan_progress",
                 ProgressEvent { message: msg.to_string(), fraction },
             );
-            vlog_dyn(
+            vlog_dyn_sync(
                 &progress_app,
                 format!(
                     "scan_progress emitted to frontend: message={msg:?} fraction={fraction:?}"
@@ -905,7 +906,7 @@ async fn scan_device(
     // for a specific filename and see both sides.
     let verbose = {
         let guard = state.lock().unwrap();
-        guard.settings.verbose_logging
+        guard.settings.verbose_sync_logging
     };
     if verbose {
         vlog(&app, true, format!(
@@ -1055,13 +1056,24 @@ fn vlog(app: &AppHandle, verbose: bool, line: impl AsRef<str>) {
     }
 }
 
-/// Same as [vlog] but reads the `verbose_logging` flag from app state on
-/// each call. Used by long-lived background tasks (e.g. the heartbeat)
-/// where the user may toggle the setting while the task is running.
+/// Same as [vlog] but reads the connection-side verbose flag from app
+/// state on each call. Used by long-lived background tasks (e.g. the
+/// heartbeat) where the user may toggle the setting while the task is
+/// running.
 fn vlog_dyn(app: &AppHandle, line: impl AsRef<str>) {
     let verbose = app
         .try_state::<Mutex<AppState>>()
-        .map(|s| s.lock().map(|g| g.settings.verbose_logging).unwrap_or(false))
+        .map(|s| s.lock().map(|g| g.settings.verbose_connection_logging).unwrap_or(false))
+        .unwrap_or(false);
+    vlog(app, verbose, line);
+}
+
+/// Sync-side counterpart to [vlog_dyn] — reads the sync verbose flag.
+/// Used by scan-progress relays where the user may toggle mid-scan.
+fn vlog_dyn_sync(app: &AppHandle, line: impl AsRef<str>) {
+    let verbose = app
+        .try_state::<Mutex<AppState>>()
+        .map(|s| s.lock().map(|g| g.settings.verbose_sync_logging).unwrap_or(false))
         .unwrap_or(false);
     vlog(app, verbose, line);
 }
@@ -1229,12 +1241,25 @@ fn days_to_ymd(days: i64) -> (i32, u32, u32) {
 }
 
 #[tauri::command]
-fn set_verbose_logging(
+fn set_verbose_sync_logging(
     value: bool,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<(), String> {
     let mut guard = state.lock().unwrap();
-    guard.settings.verbose_logging = value;
+    guard.settings.verbose_sync_logging = value;
+    let path = guard.settings_path.clone();
+    let to_save = guard.settings.clone();
+    drop(guard);
+    to_save.save(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_verbose_connection_logging(
+    value: bool,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<(), String> {
+    let mut guard = state.lock().unwrap();
+    guard.settings.verbose_connection_logging = value;
     let path = guard.settings_path.clone();
     let to_save = guard.settings.clone();
     drop(guard);
@@ -2240,7 +2265,8 @@ fn main() {
             set_playlist_action,
             scan_device,
             set_delete_unused_songs,
-            set_verbose_logging,
+            set_verbose_sync_logging,
+            set_verbose_connection_logging,
             toggle_cleanup_playlist,
             forget_pairing,
             add_ignored_device,

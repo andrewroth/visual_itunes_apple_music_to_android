@@ -69,8 +69,11 @@ function formatTime(ms) {
   return new Date(ms).toLocaleTimeString();
 }
 
+// Frontend-side verbose lines (scan/sync progress relays) are gated on
+// the sync flag. The connection flag controls backend-emitted heartbeat
+// lines which arrive via the `log_line` event and are appended directly.
 function verboseLog(line) {
-  if (!lastSettings.verbose_logging) return;
+  if (!lastSettings.verbose_sync_logging) return;
   appendLog(line);
 }
 
@@ -1265,20 +1268,31 @@ window.addEventListener("DOMContentLoaded", async () => {
   // that's been replaced by the in-table orphan row. Handler attached
   // inline in renderPlaylists() now.)
 
-  // Verbose-logging checkbox in the About tab.
-  const vlog = $("verbose_logging");
-  if (vlog) {
-    vlog.checked = !!lastSettings.verbose_logging;
-    vlog.addEventListener("change", async (e) => {
-      await invoke("set_verbose_logging", { value: e.target.checked });
-      lastSettings.verbose_logging = e.target.checked;
-      appendLog(
-        e.target.checked
-          ? "Verbose logging ON — per-track matching detail will appear here and in musicsync-YYYY-MM-DD.log"
-          : "Verbose logging OFF"
-      );
+  // Verbose-logging checkboxes in the About tab. Two flags now: one for
+  // sync-side detail (library/track inventory, manifest, scan progress)
+  // and one for connection-side detail (heartbeat, WS connect/auth).
+  function bindVerboseToggle(id, settingKey, invokeCmd, label) {
+    const el = $(id);
+    if (!el) return;
+    el.checked = !!lastSettings[settingKey];
+    el.addEventListener("change", async (e) => {
+      await invoke(invokeCmd, { value: e.target.checked });
+      lastSettings[settingKey] = e.target.checked;
+      appendLog(`${label} ${e.target.checked ? "ON" : "OFF"}`);
     });
   }
+  bindVerboseToggle(
+    "verbose_sync_logging",
+    "verbose_sync_logging",
+    "set_verbose_sync_logging",
+    "Detailed syncing info"
+  );
+  bindVerboseToggle(
+    "verbose_connection_logging",
+    "verbose_connection_logging",
+    "set_verbose_connection_logging",
+    "Detailed connection info"
+  );
   // "Click here to export to a file" — dumps the in-memory Log tab
   // contents to a user-chosen file via a native save dialog.
   const exportBtn = $("export_log");

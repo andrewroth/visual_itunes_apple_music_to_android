@@ -444,16 +444,26 @@
           <input
             type="checkbox"
             class="form-check-input"
-            id="verbose_logging"
+            id="verbose_sync_logging"
           />
-          <label class="form-check-label" for="verbose_logging">
-            Extra verbose debugging logs
+          <label class="form-check-label" for="verbose_sync_logging">
+            Detailed syncing info
           </label>
-          <div class="text-muted small">
-            Writes extra details about all operations.
-            <a href="#" id="export_log" role="button">Click here to export
-            to a file</a>.
-          </div>
+        </div>
+        <div class="form-check">
+          <input
+            type="checkbox"
+            class="form-check-input"
+            id="verbose_connection_logging"
+          />
+          <label class="form-check-label" for="verbose_connection_logging">
+            Detailed connection info
+          </label>
+        </div>
+        <div class="text-muted small mt-1">
+          Writes extra details to the Log tab.
+          <a href="#" id="export_log" role="button">Click here to export
+          to a file</a>.
         </div>
       </div>
     </div>
