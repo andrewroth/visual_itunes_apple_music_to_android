@@ -133,14 +133,36 @@
                   class="form-control form-control-sm"
                   style="background:#f7f7f7"
                 ></span>
+                <!-- Manual entry: split ws://, IP, :, port. The combined
+                     value is mirrored into the hidden #ws_url field so
+                     every other reader (scanDevice, runSync, settings
+                     save) keeps using the same canonical key. -->
+                <span
+                  id="ws_url_proto"
+                  class="input-group-text"
+                  style="display: none"
+                >ws://</span>
                 <input
                   type="text"
                   class="form-control form-control-sm"
-                  id="ws_url"
-                  name="ws_url"
-                  placeholder="ws://192.168.0.10:7800"
+                  id="ws_url_ip"
+                  aria-label="IP address"
                   style="display: none"
                 />
+                <span
+                  id="ws_url_colon"
+                  class="input-group-text"
+                  style="display: none"
+                >:</span>
+                <input
+                  type="text"
+                  class="form-control form-control-sm"
+                  id="ws_url_port"
+                  inputmode="numeric"
+                  aria-label="Port"
+                  style="display: none; max-width: 6em"
+                />
+                <input type="hidden" id="ws_url" name="ws_url" />
                 <button
                   type="button"
                   id="ws_url_edit"

@@ -1348,7 +1348,11 @@ fn toggle_cleanup_playlist(
 /// the frontend is purely a UI swap, doesn't stop this.
 #[tauri::command]
 fn start_discovery(app: AppHandle) -> Result<(), String> {
-    discovery::start_browse(app);
+    discovery::start_browse(app.clone());
+    // Also start the long-running listener for unsolicited "I'm here"
+    // announcements from companions that remember our IP. Companions
+    // proactively send these on boot / network change.
+    discovery::start_announce_listener(app);
     Ok(())
 }
 
@@ -1420,7 +1424,7 @@ fn start_heartbeat(
                     );
                     tracing::debug!("heartbeat connect failed: {e}; retry in {backoff_secs}s");
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                    backoff_secs = (backoff_secs * 2).min(15);
+                    backoff_secs = (backoff_secs * 2).min(5);
                     continue;
                 }
             };
@@ -1493,7 +1497,7 @@ fn start_heartbeat(
                     last_emitted_alive = Some(false);
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                backoff_secs = (backoff_secs * 2).min(15);
+                backoff_secs = (backoff_secs * 2).min(5);
                 continue;
             }
 
@@ -1805,6 +1809,190 @@ async fn probe_recent_device(
             device_name,
             host,
             port,
+        },
+    );
+}
+
+/// Aggressive fallback discovery: TCP-sweep every host in the desktop's
+/// local /24 on port 7800, looking for an open WebSocket. For each open
+/// port we attempt a WS upgrade + HELLO (with our token if paired) or
+/// PAIR_REQUEST (if unpaired) and emit `discovery_found` only on a
+/// proper protocol reply — so unrelated services that happen to listen
+/// on 7800 don't cause spurious pair prompts.
+///
+/// Bounded concurrency (64 in flight) and tight timeouts (TCP 250ms,
+/// upgrade 500ms, protocol reply 800ms) keep the worst case to a few
+/// seconds even on a sparse subnet. Skips loopback and link-local
+/// interfaces, and skips the desktop's own IP.
+#[tauri::command]
+fn start_subnet_sweep(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn(async move {
+        sweep_local_subnet(app).await;
+    });
+    Ok(())
+}
+
+async fn sweep_local_subnet(app: AppHandle) {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let local_v4s: Vec<Ipv4Addr> = match if_addrs::get_if_addrs() {
+        Ok(addrs) => addrs
+            .into_iter()
+            .filter_map(|iface| {
+                if iface.is_loopback() { return None; }
+                if let IpAddr::V4(v4) = iface.ip() {
+                    if v4.octets()[0] == 169 && v4.octets()[1] == 254 { return None; }
+                    Some(v4)
+                } else { None }
+            })
+            .collect(),
+        Err(e) => { tracing::warn!("subnet sweep: if_addrs failed: {e}"); return; }
+    };
+    if local_v4s.is_empty() { return; }
+
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
+    let mut tried: std::collections::HashSet<Ipv4Addr> = std::collections::HashSet::new();
+    let mut handles = Vec::new();
+
+    for own in &local_v4s {
+        let o = own.octets();
+        // Treat each interface's network as a /24. Sweep 1..=254 of the
+        // last octet, skipping our own IP and any IP we've already
+        // queued from a previous interface (multi-homed desktops).
+        for last in 1u8..=254 {
+            let target = Ipv4Addr::new(o[0], o[1], o[2], last);
+            if target == *own { continue; }
+            if !tried.insert(target) { continue; }
+            let sem = sem.clone();
+            let app_clone = app.clone();
+            handles.push(tauri::async_runtime::spawn(async move {
+                let _permit = match sem.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                probe_subnet_host(app_clone, target).await;
+            }));
+        }
+    }
+    // We don't await the handles — the spawned tasks emit on success
+    // and the rest of the frontend's discovery_found path handles them.
+    // Returning early lets the caller continue with other work.
+    tracing::info!("subnet sweep dispatched {} probes", handles.len());
+}
+
+async fn probe_subnet_host(app: AppHandle, host: std::net::Ipv4Addr) {
+    use futures_util::{SinkExt, StreamExt};
+    use musicsync_core::protocol::{
+        ClientMessage, ServerMessage, DEFAULT_PORT, PROTOCOL_VERSION,
+    };
+    use tokio_tungstenite::tungstenite::Message;
+
+    let socket_addr = std::net::SocketAddr::new(std::net::IpAddr::V4(host), DEFAULT_PORT);
+
+    // Step 1: cheap TCP connect with a tight timeout. If the port isn't
+    // open, bail without paying the WS upgrade cost.
+    let connect = tokio::net::TcpStream::connect(socket_addr);
+    if tokio::time::timeout(std::time::Duration::from_millis(250), connect)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .is_none()
+    {
+        return;
+    }
+
+    let ws_url = format!("ws://{host}:{DEFAULT_PORT}");
+    let connect = tokio_tungstenite::connect_async(&ws_url);
+    let ws = match tokio::time::timeout(std::time::Duration::from_millis(500), connect).await {
+        Ok(Ok((w, _))) => w,
+        _ => return, // not WebSocket
+    };
+    let (mut sink, mut stream) = ws.split();
+
+    // Step 2: pick HELLO or PAIR_REQUEST based on whether we already
+    // have a token. PAIR_REQUEST triggers the phone's pair dialog, so
+    // we only use it when the user has no stored pairing — otherwise
+    // we'd interrupt them with a pair prompt for every neighbour scan.
+    let (token, has_token) = {
+        let state = app.state::<Mutex<AppState>>();
+        let guard = state.lock().unwrap();
+        let t = guard.settings.device_token.clone().unwrap_or_default();
+        let has = !t.is_empty();
+        (t, has)
+    };
+    let (u, h) = pair::desktop_identity();
+    let msg = if has_token {
+        ClientMessage::Hello {
+            token,
+            protocol_version: PROTOCOL_VERSION,
+            desktop_user: u,
+            desktop_host: h,
+        }
+    } else {
+        // Just probing — don't actually pair yet. We'll cancel right
+        // after we see PairChallenge so the phone's dialog goes away.
+        ClientMessage::PairRequest {
+            protocol_version: PROTOCOL_VERSION,
+            desktop_user: u,
+            desktop_host: h,
+        }
+    };
+    let txt = match serde_json::to_string(&msg) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    if sink.send(Message::Text(txt.into())).await.is_err() {
+        return;
+    }
+
+    // Step 3: wait briefly for ANY musicsync-shaped reply. Both
+    // HelloOk and PairChallenge identify the device.
+    let outcome = tokio::time::timeout(std::time::Duration::from_millis(800), async {
+        while let Some(frame) = stream.next().await {
+            match frame {
+                Ok(Message::Text(t)) => {
+                    match serde_json::from_str::<ServerMessage>(&t) {
+                        Ok(ServerMessage::HelloOk { device_id, device_name, .. }) => {
+                            return Some((device_id, device_name));
+                        }
+                        Ok(ServerMessage::PairChallenge { device_id, device_name, .. }) => {
+                            return Some((device_id, device_name));
+                        }
+                        Ok(_) => return None,
+                        Err(_) => return None,
+                    }
+                }
+                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
+                _ => return None,
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+
+    // Step 4: if we kicked off pairing, cancel it cleanly so the
+    // phone's dialog dismisses. Don't care about the result.
+    if !has_token {
+        let _ = sink.send(Message::Text(
+            serde_json::to_string(&ClientMessage::PairCancel)
+                .unwrap_or_default()
+                .into(),
+        )).await;
+    }
+    let _ = sink.send(Message::Close(None)).await;
+
+    let Some((device_id, device_name)) = outcome else { return };
+    tracing::info!("subnet sweep found {device_name} at {ws_url}");
+    let _ = app.emit(
+        "discovery_found",
+        discovery::DiscoveryFoundEvent {
+            ws_url,
+            device_id,
+            device_name,
+            host: host.to_string(),
+            port: DEFAULT_PORT,
         },
     );
 }
@@ -2277,6 +2465,7 @@ fn main() {
             reveal_working_dir,
             write_text_file,
             start_recent_probe,
+            start_subnet_sweep,
         ])
         .run(tauri::generate_context!())
         .expect("error running MusicSync");

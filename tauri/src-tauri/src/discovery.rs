@@ -32,6 +32,12 @@ pub struct DiscoveryFoundEvent {
 const DISCOVERY_PORT: u16 = 7799;
 const PROBE_PREAMBLE: &str = "MUSICSYNC_DISCOVER";
 const REPLY_PREAMBLE: &str = "MUSICSYNC_HERE";
+/// Port the desktop binds permanently to receive unsolicited "I'm here"
+/// announcements from companions that remember having connected to it.
+/// Different from DISCOVERY_PORT (7799) so the phone's
+/// [DiscoveryResponder] socket can stay bound on its end without
+/// fighting the desktop for the port locally.
+const ANNOUNCE_PORT: u16 = 7798;
 
 /// UDP-broadcast discovery. Sends one "MUSICSYNC_DISCOVER" packet to the
 /// IPv4 broadcast address(es) on every local interface, listens for ~3
@@ -137,6 +143,58 @@ pub fn start_lan_scan(app: AppHandle) {
             });
         }
         tracing::info!("UDP discovery done");
+    });
+}
+
+/// Long-running UDP listener bound to [ANNOUNCE_PORT]. Receives
+/// unsolicited "MUSICSYNC_HERE" packets that companions send on startup
+/// / network change to every desktop IP they remember having served.
+/// This is the "phone tells us we're alive" inverse of the broadcast
+/// probe — works on networks where multicast/broadcast is filtered but
+/// unicast UDP is fine.
+///
+/// Emits `discovery_found` for each unique sender. Runs for the lifetime
+/// of the desktop process; the frontend's existing dispatcher takes
+/// care of dedup and either auto-pair or auto-scan.
+pub fn start_announce_listener(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let sock = match tokio::net::UdpSocket::bind(("0.0.0.0", ANNOUNCE_PORT)).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("announce listen bind failed: {e}");
+                return;
+            }
+        };
+        tracing::info!("announce listener bound on udp:{ANNOUNCE_PORT}");
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let (n, from) = match sock.recv_from(&mut buf).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("announce recv err: {e}");
+                    break;
+                }
+            };
+            let payload = std::str::from_utf8(&buf[..n]).unwrap_or("").trim();
+            if !payload.starts_with(REPLY_PREAMBLE) { continue; }
+            let json_start = payload.find('{').unwrap_or(payload.len());
+            let parsed: serde_json::Value =
+                match serde_json::from_str(&payload[json_start..]) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+            let device_name = parsed.get("name").and_then(|v| v.as_str())
+                .unwrap_or("(unknown)").to_string();
+            let device_id = parsed.get("id").and_then(|v| v.as_str())
+                .unwrap_or("").to_string();
+            let port = parsed.get("port").and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_PORT as u64) as u16;
+            let host = from.ip().to_string();
+            let ws_url = format!("ws://{host}:{port}");
+            let _ = app.emit("discovery_found", DiscoveryFoundEvent {
+                ws_url, device_id, device_name, host, port,
+            });
+        }
     });
 }
 

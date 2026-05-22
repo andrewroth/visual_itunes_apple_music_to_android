@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.os.Build
 import androidx.documentfile.provider.DocumentFile
 import io.ktor.server.application.install
+import io.ktor.server.plugins.origin
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.routing.routing
@@ -91,6 +92,10 @@ class SyncServer(private val config: Config) {
          *  connected. UI uses this for both the chip color and to show
          *  "Desktop andrew@192.168.0.42 connected". */
         val onClientsChanged: (labels: List<String>) -> Unit = {},
+        /** Called once per session after HELLO auth succeeds, with the
+         *  desktop's source IP. Used to populate the proactive-announce
+         *  list so we can ping known desktops on boot / network change. */
+        val onClientAuthed: (ip: String) -> Unit = {},
         val onEvent: (String) -> Unit = {},
         val port: Int = DEFAULT_PORT,
     )
@@ -243,6 +248,13 @@ class SyncServer(private val config: Config) {
             // adopt the desktop's identity for the UI chip.
             client.label = formatLabel(helloMsg.desktop_user, helloMsg.desktop_host)
             fireClientsChanged()
+            // Remember this desktop's IP so we can proactively announce
+            // ourselves to it next boot. Best-effort — if Ktor can't
+            // expose the remote host for some reason, skip silently.
+            try {
+                val ip = session.call.request.origin.remoteHost
+                if (!ip.isNullOrBlank()) config.onClientAuthed(ip)
+            } catch (_: Exception) { /* ignore */ }
             send(
                 session,
                 ServerMessage.HelloOk(

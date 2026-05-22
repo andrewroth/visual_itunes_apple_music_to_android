@@ -48,6 +48,16 @@ class SyncService : Service() {
             deviceId = { deviceIdStore.get() },
         )
     }
+    private val rememberedDesktopsStore by lazy {
+        RememberedDesktopsStore(applicationContext)
+    }
+    private val desktopAnnouncer by lazy {
+        DesktopAnnouncer(
+            store = rememberedDesktopsStore,
+            deviceName = { deviceNameStore.get() },
+            deviceId = { deviceIdStore.get() },
+        )
+    }
 
     private val _deviceName = MutableStateFlow<String>("")
     val deviceName: StateFlow<String> = _deviceName
@@ -284,6 +294,9 @@ class SyncService : Service() {
                         armSearchTimeout()
                     }
                 },
+                onClientAuthed = { ip ->
+                    rememberedDesktopsStore.remember(ip)
+                },
                 onEvent = { msg -> pushEvent(msg) },
             ),
         )
@@ -291,7 +304,43 @@ class SyncService : Service() {
         server?.start()
         advertiser.register(deviceNameStore.get(), deviceIdStore.get(), DEFAULT_PORT)
         discoveryResponder.start()
+        // Proactively tell desktops we've ever served that we're back
+        // online. Unicast UDP — works on networks that filter broadcast
+        // / multicast. Also re-fires on every reconnection (below).
+        desktopAnnouncer.announceOnce()
+        registerNetworkCallback()
         armSearchTimeout()
+    }
+
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * Re-announce ourselves whenever the OS reports a new usable
+     * network — Wi-Fi reconnect after the phone moved between APs,
+     * VPN coming up, etc. Cheap enough to fire on every onAvailable
+     * without rate-limiting; the announcer is ~80 bytes × N desktops.
+     */
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return
+        val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+            as? android.net.ConnectivityManager ?: return
+        val cb = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                desktopAnnouncer.announceOnce()
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(cb)
+            networkCallback = cb
+        } catch (_: Exception) { /* ignore — best effort */ }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+            as? android.net.ConnectivityManager ?: return
+        try { cm.unregisterNetworkCallback(cb) } catch (_: Exception) { }
+        networkCallback = null
     }
 
     /**
@@ -361,6 +410,7 @@ class SyncService : Service() {
     fun stopServer() {
         advertiser.unregister()
         discoveryResponder.stop()
+        unregisterNetworkCallback()
         server?.stop()
         server = null
         cancelSearchTimeout()

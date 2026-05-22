@@ -92,6 +92,10 @@ listen("scan_progress", (e) => {
     `scan_progress event received: message=${JSON.stringify(message)} ` +
     `fraction=${typeof fraction === "number" ? fraction : "null"}`
   );
+  // The phone is actively walking its music folder for us — that's
+  // proof of life. Restore the green dot + the right device label even
+  // if the heartbeat went stale in the meantime.
+  markDeviceAlive();
   setStatusMessage("info", message);
   if (typeof fraction === "number") {
     const pct = Math.round(fraction * 100);
@@ -104,6 +108,9 @@ listen("scan_progress", (e) => {
 });
 listen("scan_complete", (e) => {
   const { files, playlists } = e.payload;
+  // Manifest just landed — phone is definitively alive and we have a
+  // valid connection. Flip indicator to green.
+  markDeviceAlive();
   setStatusMessage(
     "success",
     `Scan complete, ready to copy. (${files} tracks, ${playlists} playlists)`,
@@ -639,6 +646,11 @@ listen("sync_started", () => {
   stop.removeAttribute("disabled");
   stop.textContent = "Stop sync";
   resetEta();
+  // Sync couldn't have started without a successful HELLO_OK from the
+  // phone, so the device is definitively alive right now — restore the
+  // green dot in case the heartbeat got out of sync (e.g. a brief
+  // network blip dropped the presence WS while the sync WS recovered).
+  markDeviceAlive();
 });
 listen("sync_ended", () => {
   const stop = $("stop_sync");
@@ -745,6 +757,10 @@ listen("progress", (e) => {
     `progress event received: message=${JSON.stringify(message)} ` +
     `fraction=${typeof fraction === "number" ? fraction : "null"}`
   );
+  // Any progress event is proof the sync WS is alive RIGHT NOW.
+  // Force the UI back to "alive" if it had stalled at searching/dead
+  // because the heartbeat WS happened to be the slower-to-recover one.
+  markDeviceAlive();
   // Pick a colour from the message content. Most progress is info; the
   // explicit successes / errors / aborts get matching styles.
   let level = "info";
@@ -929,10 +945,26 @@ function startScanCycle() {
   _scanIntervalId = setInterval(() => {
     invoke("start_lan_scan").catch(() => {});
   }, 2000);
+  // Fire the manual fallback and the subnet sweep RIGHT NOW alongside
+  // mDNS, not after a delay. They run in parallel; whichever finds
+  // the phone first wins.
+  if (!window._wsUrl) {
+    tryRememberedManual();
+    invoke("start_subnet_sweep").catch(() => {});
+  }
+  // Re-sweep every 10s while we're still in searching mode. The mDNS
+  // cycle is fast and cheap; the sweep is bounded and only fires
+  // again when we haven't found anything.
+  const sweepInterval = setInterval(() => {
+    if (window._wsUrl) { clearInterval(sweepInterval); return; }
+    invoke("start_subnet_sweep").catch(() => {});
+  }, 10_000);
   _scanTimeoutId = setTimeout(() => {
-    // 30 seconds elapsed with no hit. Stop probing and show the
-    // "nothing found" state with a Rescan button.
+    clearInterval(sweepInterval);
+    // 30 seconds elapsed with no hit. Final attempt at the remembered
+    // manual address before declaring nothing found.
     stopScanCycle();
+    if (!window._wsUrl && tryRememberedManual()) return;
     showNoneFoundState();
   }, 30_000);
 }
@@ -959,6 +991,32 @@ function showNoneFoundState() {
     appendLog("Manual rescan");
     showSearchingState();
   });
+}
+
+// Synthesises a "discovery hit" against the last manually-entered
+// address, if any. Used as an aggressive fallback when mDNS / UDP
+// haven't turned anything up — direct TCP to a remembered IP often
+// works through router/firewall configs that drop broadcast packets.
+//
+// Returns true if a probe was kicked off. The actual connect goes
+// through the same heartbeat path as a real discovery_found, so a
+// dead address will cleanly drop back to searching via device_dead.
+function tryRememberedManual() {
+  const ip = localStorage.getItem(LS_MANUAL_IP);
+  const port = localStorage.getItem(LS_MANUAL_PORT) || DEFAULT_WS_PORT;
+  if (!ip) return false;
+  const wsUrl = `ws://${ip}:${port}`;
+  if (_triedDevices.has(wsUrl)) return false;
+  _triedDevices.add(wsUrl);
+  appendLog(`Trying last manual address: ${wsUrl}`);
+  $("ws_url").value = wsUrl;
+  showFoundState("last manual entry", wsUrl);
+  if (lastSettings.device_token) {
+    scanDevice().catch(() => { /* logged by scanDevice */ });
+  } else {
+    startPair();
+  }
+  return true;
 }
 
 // Re-render just the colored ● indicator + device label without
@@ -991,13 +1049,37 @@ function showFoundState(deviceName, wsUrl) {
   renderForgetPairingBtn();
 }
 
+// Default WebSocket port used by the Android companion; mirrors
+// musicsync_core::protocol::DEFAULT_PORT. Hardcoded here so the manual
+// entry form can pre-fill the port field without a round-trip.
+const DEFAULT_WS_PORT = "7800";
+
+// Per-machine memory of the most recent manual IP/port. Kept in
+// localStorage rather than settings.yml because it's a UI convenience,
+// not authoritative pairing state — discovery should still be the
+// primary path. Written on every successful Save; read on every entry
+// into manual mode.
+const LS_MANUAL_IP = "musicsync.lastManualIp";
+const LS_MANUAL_PORT = "musicsync.lastManualPort";
+
 // Toggle the input-group between "showing the discovered/found address"
 // and "letting the user type one in." During manual entry the Enter
 // manually button is hidden and Save/Cancel take its place; Forget
 // pairing also hides because it's unrelated to typing.
 function showManualState() {
   $("ws_url_display").style.display = "none";
-  $("ws_url").style.display = "";
+  $("ws_url_proto").style.display = "";
+  $("ws_url_ip").style.display = "";
+  $("ws_url_colon").style.display = "";
+  $("ws_url_port").style.display = "";
+  // Pre-fill from last-remembered manual entry (per-machine, via
+  // localStorage). Falls back to blank IP + default port on a fresh
+  // install. Only overrides the in-DOM value if the field is empty,
+  // so a half-typed value during the same session isn't clobbered.
+  const rememberedIp = localStorage.getItem(LS_MANUAL_IP) || "";
+  const rememberedPort = localStorage.getItem(LS_MANUAL_PORT) || DEFAULT_WS_PORT;
+  if (!$("ws_url_ip").value) $("ws_url_ip").value = rememberedIp;
+  if (!$("ws_url_port").value) $("ws_url_port").value = rememberedPort;
   $("ws_url_edit").style.display = "none";
   $("ws_url_save").style.display = "";
   $("ws_url_cancel").style.display = "";
@@ -1005,13 +1087,17 @@ function showManualState() {
   // Pausing auto-rescan while the user is typing keeps the searching
   // text from popping back in unexpectedly.
   stopScanCycle();
-  $("ws_url").focus();
+  $("ws_url_ip").focus();
+  $("ws_url_ip").select();
 }
 
 // Restore the display + Enter manually button. Re-honors the
 // Forget-pairing visibility rules based on current token state.
 function exitManualState() {
-  $("ws_url").style.display = "none";
+  $("ws_url_proto").style.display = "none";
+  $("ws_url_ip").style.display = "none";
+  $("ws_url_colon").style.display = "none";
+  $("ws_url_port").style.display = "none";
   $("ws_url_save").style.display = "none";
   $("ws_url_cancel").style.display = "none";
   $("ws_url_edit").style.display = "";
@@ -1020,8 +1106,18 @@ function exitManualState() {
 }
 
 async function saveManualUrl() {
-  const wsUrl = $("ws_url").value.trim();
-  if (!wsUrl) return;
+  const ip = $("ws_url_ip").value.trim();
+  const port = $("ws_url_port").value.trim() || DEFAULT_WS_PORT;
+  if (!ip) {
+    $("ws_url_ip").focus();
+    return;
+  }
+  const wsUrl = `ws://${ip}:${port}`;
+  $("ws_url").value = wsUrl;
+  // Remember for the next manual session and for the auto-connect
+  // fallback when discovery fails to find anything.
+  localStorage.setItem(LS_MANUAL_IP, ip);
+  localStorage.setItem(LS_MANUAL_PORT, port);
   exitManualState();
   // Synthesise a discovery hit so the same auto-pair / scan code path
   // runs as if mDNS had just reported this device.
@@ -1036,6 +1132,9 @@ async function saveManualUrl() {
 }
 
 function cancelManualUrl() {
+  // Clear the IP so the next time the user opens manual mode it isn't
+  // pre-populated with a stale address. Port stays at default.
+  $("ws_url_ip").value = "";
   exitManualState();
   // Whatever state we were in before the user clicked Enter manually:
   // if we already had a discovered address, restore it; otherwise back
@@ -1085,11 +1184,23 @@ const _triedDevices = new Set();
 let _heartbeatAlive = false;
 
 listen("device_alive", () => {
+  markDeviceAlive();
+});
+
+// Idempotent "we just saw proof of life from the phone" helper. Called
+// from device_alive, sync_started, every progress tick, and the scan
+// inventory event — so the indicator can't get stuck at "searching"
+// while sync activity is observably flowing through.
+//
+// Also stops the scan-cycle UI (spinner + every-2s LAN broadcasts):
+// we have a device, no point hunting for another one.
+function markDeviceAlive() {
   _heartbeatAlive = true;
+  stopScanCycle();
   if (window._foundDeviceName && window._wsUrl) {
     renderFoundDot("success");
   }
-});
+}
 
 // 4-9 seconds since the last Pong from the phone. Show the device with
 // a yellow dot to signal "still connected on paper but not responsive."
@@ -1104,15 +1215,12 @@ listen("device_yellow", () => {
 // Stored token no longer valid → ask the user with the same generic
 // "found a MusicSync App, approve?" wording. No long explanation.
 let _tokenRejectPromptOpen = false;
-listen("heartbeat_token_rejected", async () => {
-  _heartbeatAlive = false;
-  setSyncEnabled(false);
-  showSearchingState();
+async function promptForRePair(deviceName, wsUrl) {
   if (_tokenRejectPromptOpen) return;
   _tokenRejectPromptOpen = true;
   try {
-    const name = window._foundDeviceName || lastSettings.paired_device_name || "(unknown)";
-    const url = window._wsUrl || "(unknown address)";
+    const name = deviceName || window._foundDeviceName || lastSettings.paired_device_name || "(unknown)";
+    const url = wsUrl || window._wsUrl || "(unknown address)";
     const ok = window.confirm(`Found a Viamta Music Sync App. Approve?\n\n${name} (${url})`);
     if (ok) {
       await forgetPairing();
@@ -1121,18 +1229,24 @@ listen("heartbeat_token_rejected", async () => {
   } finally {
     _tokenRejectPromptOpen = false;
   }
+}
+listen("heartbeat_token_rejected", async () => {
+  _heartbeatAlive = false;
+  setSyncEnabled(false);
+  showSearchingState();
+  await promptForRePair();
 });
 
 listen("device_dead", () => {
   if (_heartbeatAlive) {
     _heartbeatAlive = false;
     appendLog(`Lost connection to ${window._foundDeviceName || "phone"}. Re-scanning…`);
-    // Forget who we were talking to so the searching banner doesn't keep
-    // the stale name, and clear the discovery dedup set so the next
-    // discovery_found event re-triggers the connect path.
+    // Clear the discovery dedup set so the next discovery_found event
+    // re-triggers the connect path. KEEP _wsUrl + _foundDeviceName so
+    // any sync activity that's still flowing (sync.rs has its own
+    // reconnect loop) can flip the indicator straight back to green
+    // via markDeviceAlive() — with the correct name preserved.
     _triedDevices.clear();
-    window._wsUrl = "";
-    // (keep window._foundDeviceName for the "Lost connection to X" log)
     setSyncEnabled(false);
     showSearchingState();
     // Kick a fresh LAN broadcast so we don't wait for the next mDNS tick.
@@ -1188,11 +1302,11 @@ listen("discovery_found", async (e) => {
       const msg = String(err);
       const looksLikeAuth = /bad token|auth|violated/i.test(msg);
       if (looksLikeAuth) {
-        appendLog(
-          `Stored pairing rejected by ${device_name}. ` +
-          `If this is the phone you meant to use, tap "Forget pairing" ` +
-          `here (or on the phone) and then reconnect.`
-        );
+        appendLog(`Stored pairing rejected by ${device_name} — prompting to re-pair.`);
+        // Same flow as heartbeat_token_rejected: pop the approve dialog
+        // instead of just logging, so the user can recover without
+        // hunting for the Forget-pairing button.
+        await promptForRePair(device_name, ws_url);
       } else {
         appendLog(`Couldn't reach ${device_name}: ${err}`);
       }
@@ -1373,6 +1487,13 @@ window.addEventListener("DOMContentLoaded", async () => {
   // dropped, leaving the address bar stuck on the "Scanning…" → "No
   // … Apps Found" path even while sync proceeds in the background.
   try { await invoke("start_recent_probe"); } catch (e) { appendLog(`Recent-probe failed: ${e}`); }
+  // Try the remembered manual entry immediately as well — most users
+  // who once typed an address will hit it again next launch, and a
+  // direct TCP probe gets through where broadcast / mDNS doesn't.
+  if (!window._wsUrl) tryRememberedManual();
+  // And launch a subnet sweep in parallel for the case where the
+  // phone moved to a new IP overnight. Cheap and bounded.
+  invoke("start_subnet_sweep").catch(() => {});
   // showSearchingState() (called above) already kicked off the
   // every-2-seconds UDP broadcast cycle, so no need to fire one here.
   // Attempt initial load if a library path is set.
