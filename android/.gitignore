@@ -5,10 +5,6 @@ build/
 captures/
 .kotlin/
 
-# Wrapper jar gets re-downloaded by gradlew on first run, so excluding
-# it keeps the repo lean. (Some teams commit it; we don't.)
-gradle/wrapper/gradle-wrapper.jar
-
 # Android Studio / IntelliJ
 .idea/
 *.iml
