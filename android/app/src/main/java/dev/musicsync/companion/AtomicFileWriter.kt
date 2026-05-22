@@ -119,11 +119,15 @@ object AtomicFileWriter {
 internal fun validateRelativePath(input: String): String? {
     if (input.isBlank()) return null
     if (input.startsWith('/') || input.contains('\\')) return null
-    if (input.contains("..")) return null
     val cleaned = input
         .removePrefix("./")
         .trim('/')
         .replace(Regex("/+"), "/")
     if (cleaned.isEmpty()) return null
+    // Reject ".." as a whole path SEGMENT, not as a substring — filenames
+    // are allowed to contain consecutive dots ("Dismantle.Repair..m4a").
+    for (seg in cleaned.split('/')) {
+        if (seg == ".." || seg == ".") return null
+    }
     return cleaned
 }
