@@ -796,7 +796,7 @@ async fn scan_device(
     use musicsync_core::matching::{mark_on_device_loose, DeviceFile};
     use std::collections::HashSet;
 
-    let (mut tracks_clone, playlists_clone, token) = {
+    let (mut tracks_clone, _playlists_clone, token) = {
         let guard = state.lock().unwrap();
         let lib = guard
             .library
