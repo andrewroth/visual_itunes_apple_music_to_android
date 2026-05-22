@@ -1068,8 +1068,25 @@ function startScanCycle() {
 // state (searching, none-found, manual entry, yellow stale dot).
 let _showingGreenDot = false;
 
+// Mirror _showingGreenDot to a body class so styles.css can tint the
+// background (light gray when disconnected, white when connected).
+// Also surfaces a status-banner message on the green → not-green
+// transition so the user gets an explanation, not just a colour change.
+let _wasConnected = false;
+function applyBgState() {
+  document.body.classList.toggle("disconnected", !_showingGreenDot);
+  if (_wasConnected && !_showingGreenDot) {
+    // Transition: was connected, now isn't.
+    setStatusMessage("warning", "Disconnected from phone — searching…");
+  }
+  _wasConnected = _showingGreenDot;
+}
+// Initial sync — both _showingGreenDot and _wasConnected are now in
+// scope so this won't TDZ.
+applyBgState();
+
 function showSearchingState() {
-  _showingGreenDot = false;
+  _showingGreenDot = false; applyBgState();
   $("ws_url_display").style.display = "";
   $("ws_url_display").innerHTML =
     `<span class="spinner-border spinner-border-sm me-1 text-danger"></span> ` +
@@ -1080,7 +1097,7 @@ function showSearchingState() {
 }
 
 function showNoneFoundState() {
-  _showingGreenDot = false;
+  _showingGreenDot = false; applyBgState();
   $("ws_url_display").style.display = "";
   $("ws_url_display").innerHTML =
     `<span class="text-muted">No Viamta Music Sync Apps Found.</span> ` +
@@ -1121,7 +1138,7 @@ function tryRememberedManual() {
 // Re-render just the colored ● indicator + device label without
 // touching anything else. Called by the alive/yellow listeners.
 function renderFoundDot(colorClass /* "success" | "warning" */) {
-  _showingGreenDot = (colorClass === "success");
+  _showingGreenDot = (colorClass === "success"); applyBgState();
   const deviceName = window._foundDeviceName || "";
   const wsUrl = window._wsUrl || "";
   $("ws_url_display").innerHTML =
@@ -1131,7 +1148,7 @@ function renderFoundDot(colorClass /* "success" | "warning" */) {
 }
 
 function showFoundState(deviceName, wsUrl) {
-  _showingGreenDot = true;
+  _showingGreenDot = true; applyBgState();
   $("ws_url").value = wsUrl;
   $("ws_url_display").style.display = "";
   $("ws_url_display").innerHTML =
@@ -1164,7 +1181,7 @@ const LS_MANUAL_PORT = "musicsync.lastManualPort";
 // manually button is hidden and Save/Cancel take its place; Forget
 // pairing also hides because it's unrelated to typing.
 function showManualState() {
-  _showingGreenDot = false;
+  _showingGreenDot = false; applyBgState();
   $("ws_url_display").style.display = "none";
   $("ws_url_proto").style.display = "";
   $("ws_url_ip").style.display = "";
@@ -1468,7 +1485,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (!ok) return false;
     try { await invoke("stop_heartbeat"); } catch (_) { /* fine */ }
     _heartbeatAlive = false;
-    _showingGreenDot = false;
+    _showingGreenDot = false; applyBgState();
     _triedDevices.clear();
     window._wsUrl = "";
     window._foundDeviceName = "";

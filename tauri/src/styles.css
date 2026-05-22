@@ -17,6 +17,14 @@ body {
      margin that broke the 100vh budget — overflow:hidden above plus
      this padding replaces it cleanly. */
   padding: 4px 8px 24px 8px;
+  /* Smooth tint between connected (white) and disconnected (light
+     gray). main.js toggles the .disconnected class based on the
+     _showingGreenDot flag — see applyBgState(). */
+  transition: background-color 0.2s ease;
+  background-color: #ffffff;
+}
+body.disconnected {
+  background-color: #f0f0f0;
 }
 body > .nav-tabs { flex-shrink: 0; }
 body > hr,
