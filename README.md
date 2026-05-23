@@ -1,12 +1,14 @@
 # Viamta Music Sync
 
-Visual iTunes/Apple Music to Android
+**V**isual **i**Tunes/**A**pple **M**usic to **A**ndroid
 
 Visually select playlists to sync to a device.
 
 Desktop app available for Mac / Windows / Linux. Connects to Android companion app for fast transfer.
 
 Scans music files via companion app and tansfers only what's needed based on selected playlists.
+
+Note - Works with Apple Music only when you use it to manage your own music files, not the streaming service.
 
 ## Get it
 
