@@ -30,7 +30,7 @@ Note - Works with Apple Music only when you use it to manage your own music file
 
 <img width="60%" alt="image" src="https://github.com/user-attachments/assets/09cac717-974f-4d54-b0e2-41e0a22dd0cb" />
 <br/>
-<img width="60%"  alt="image" src="https://github.com/user-attachments/assets/a115d372-9e56-43f4-a58a-d80015762163" />
+<img width="60%" alt="image" src="https://github.com/user-attachments/assets/730026c7-8456-43be-b357-05826a732ba2" />
 <br/><br/>
 <img width="33%"  alt="Screenshot_20260523_000422_Viamta Music Sync" src="https://github.com/user-attachments/assets/f89f0765-ac24-4365-867c-93340b62b00d" />
 <br/><br/>
