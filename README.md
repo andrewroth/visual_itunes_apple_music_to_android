@@ -25,3 +25,18 @@ Note - Works with Apple Music only when you use it to manage your own music file
 5. Choose playlists you want copied to the android device by clicking on
    a playlist row in the desktop app.
 6. Hit Sync Now
+
+## Screenshots
+
+<img width="60%" alt="image" src="https://github.com/user-attachments/assets/09cac717-974f-4d54-b0e2-41e0a22dd0cb" />
+<br/>
+<img width="60%"  alt="image" src="https://github.com/user-attachments/assets/a5988963-903e-48b0-9df3-cd36cb510ad9" />
+<br/>
+<img width="60%"  alt="image" src="https://github.com/user-attachments/assets/a115d372-9e56-43f4-a58a-d80015762163" />
+<br/><br/>
+<img width="33%"  alt="Screenshot_20260523_000422_Viamta Music Sync" src="https://github.com/user-attachments/assets/f89f0765-ac24-4365-867c-93340b62b00d" />
+<br/><br/>
+<img width="33%"  alt="Screenshot_20260523_000358_Viamta Music Sync" src="https://github.com/user-attachments/assets/631a3a09-0d3c-422a-925d-aa99bec5c8fb" />
+<br/><br/>
+<img width="33%"  alt="Screenshot_20260522_234634_Viamta Music Sync" src="https://github.com/user-attachments/assets/ad7f7a74-e9da-4761-bbb4-dad06a08b4f5" />
+
