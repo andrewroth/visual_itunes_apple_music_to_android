@@ -16,6 +16,16 @@ set -euo pipefail
 
 REPO="andrewroth/visual_itunes_apple_music_to_android"
 
+# Single source of truth for the version. Edit /VERSION at the repo root
+# and run scripts/sync-version.sh to propagate into Cargo/Tauri/Gradle.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+VERSION=$(tr -d '[:space:]' < "$ROOT/VERSION")
+if [[ -z "$VERSION" ]]; then
+  echo "Could not read $ROOT/VERSION" >&2
+  exit 1
+fi
+
 usage() {
   echo "Usage: $0 [run-id]" >&2
   exit 64
@@ -45,8 +55,8 @@ echo "Using CI run: $RUN_ID"
 # Commit the run was built from — used as the release target.
 RUN_SHA=$(gh run view "$RUN_ID" --repo "$REPO" --json headSha --jq .headSha)
 SHORT_SHA="${RUN_SHA:0:7}"
-TAG="v0.2.1-pre-$SHORT_SHA"
-TITLE="v0.2.1-pre ($SHORT_SHA)"
+TAG="v$VERSION-pre-$SHORT_SHA"
+TITLE="v$VERSION-pre ($SHORT_SHA)"
 echo "Target commit: $RUN_SHA  tag: $TAG"
 
 # Bail if a release already exists for this commit so we don't clobber it.
@@ -94,7 +104,7 @@ LIN_RPM=$(find_one "linux rpm"          "$TMP/musicsync-linux" -name '*.rpm' -ty
 
 # Rename the APK to a friendlier user-facing filename without touching
 # the original (cp into the tmp dir so cleanup is automatic).
-ANDROID_APK="$TMP/Viamta-Music-Sync-0.2.1-android.apk"
+ANDROID_APK="$TMP/Viamta-Music-Sync-$VERSION-android.apk"
 cp "$ANDROID_SRC" "$ANDROID_APK"
 
 # --- Push the tag -----------------------------------------------------------
