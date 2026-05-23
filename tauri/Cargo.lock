@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "musicsync-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -1894,7 +1894,7 @@ dependencies = [
 
 [[package]]
 name = "musicsync-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "directories",
