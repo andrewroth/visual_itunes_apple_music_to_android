@@ -1,6 +1,6 @@
 # Viamta Music Sync
 
-**V**isual **i**Tunes/**A**pple **M**usic to **A**ndroid
+**V**isual **i**Tunes/**A**pple **M**usic **t**o **A**ndroid
 
 Visually select playlists to sync to a device.
 
