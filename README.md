@@ -2,7 +2,7 @@
 
 **V**isual **i**Tunes/**A**pple **M**usic **t**o **A**ndroid
 
-Visually select playlists to sync to a device.
+Visually select playlists to sync to an android device.
 
 Desktop app available for Mac / Windows / Linux. Connects to Android companion app for fast transfer.
 
@@ -17,14 +17,16 @@ Note - Works with Apple Music only when you use it to manage your own music file
 ## Instructions
 
 1. Export your iTunes/Apple Music library. Library -> Export Library...
-2. Run the desktop app, browse for your saved export 
-3. Install and run the android app. Choose music directory.
-4. Be on the same network as the desktop app and allow access on the app
+       (unfortunately you do have to do this every time playlists are changed in iTunes/Apple Music)
+3. Run the desktop app, browse for your saved export
+       (if you keep using the same export save location, this step can be skipped)
+5. Install and run the android app. Choose music directory.
+6. Be on the same network as the desktop app and allow access on the app
    once the desktop connects. If it doesn't auto-detect, you can try a
    manual connect.
-5. Choose playlists you want copied to the android device by clicking on
+7. Choose playlists you want copied to the android device by clicking on
    a playlist row in the desktop app.
-6. Hit Sync Now
+8. Hit Sync Now
 
 ## Screenshots
 
