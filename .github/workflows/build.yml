@@ -105,6 +105,10 @@ jobs:
 
       - name: setup android sdk
         uses: android-actions/setup-android@v3
+        # The action's default also installs the obsolete "tools" package,
+        # which sdkmanager no longer offers.
+        with:
+          packages: "platform-tools"
 
       - name: setup gradle
         uses: gradle/actions/setup-gradle@v4
