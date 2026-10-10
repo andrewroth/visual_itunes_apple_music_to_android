@@ -14,6 +14,20 @@ Note - Works with Apple Music only when you use it to manage your own music file
 
 [Latest release →](../../releases)
 
+### macOS: first launch
+
+The Mac app isn't notarized by Apple, so macOS blocks it the first time you open it.
+
+1. Drag the app to Applications and open it. You'll see a warning that Apple could not verify it. Click Done.
+2. Open System Settings → Privacy & Security, scroll down to Security, and click **Open Anyway** next to Viamta Music Sync.
+3. Confirm with your password or Touch ID. You only need to do this once per download.
+
+If you instead see "Viamta Music Sync is damaged and can't be opened", don't move it to the Trash. Run this in Terminal, then open the app again:
+
+```
+xattr -cr "/Applications/Viamta Music Sync.app"
+```
+
 ## Instructions
 
 1. Export your iTunes/Apple Music library. Library -> Export Library...

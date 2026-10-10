@@ -29,6 +29,9 @@
       "icons/icon.ico",
       "icons/icon.icns"
     ],
-    "category": "Music"
+    "category": "Music",
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }
