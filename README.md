@@ -30,17 +30,33 @@ xattr -cr "/Applications/Viamta Music Sync.app"
 
 ## Instructions
 
-1. Export your iTunes/Apple Music library. Library -> Export Library...
-       (unfortunately you do have to do this every time playlists are changed in iTunes/Apple Music)
-3. Run the desktop app, browse for your saved export
-       (if you keep using the same export save location, this step can be skipped)
-5. Install and run the android app. Choose music directory.
-6. Be on the same network as the desktop app and allow access on the app
+1. Get a Library XML file from iTunes/Apple Music. Either:
+   - **Auto-updating (recommended):** turn on library XML sharing, and iTunes/Apple Music keeps the file up to date for you. See [Auto-updating library XML](#auto-updating-library-xml) below.
+   - **Manual export:** File → Library → Export Library… You have to re-export every time your playlists change.
+2. Run the desktop app and browse for the XML file. The app remembers it, and reloads automatically whenever the file changes.
+3. Install and run the android app. Choose music directory.
+4. Be on the same network as the desktop app and allow access on the app
    once the desktop connects. If it doesn't auto-detect, you can try a
    manual connect.
-7. Choose playlists you want copied to the android device by clicking on
+5. Choose playlists you want copied to the android device by clicking on
    a playlist row in the desktop app.
-8. Hit Sync Now
+6. Hit Sync Now
+
+### Auto-updating library XML
+
+iTunes and Apple Music can keep a copy of your library as XML that updates whenever your library or playlists change. Point the desktop app at it once and you never need to export again. The app only reads this file and never changes your library.
+
+**Apple Music (Mac):**
+
+1. Open Music → Settings → **Files** (on older macOS versions it's under **Advanced**).
+2. Tick **Share Library XML with other apps**.
+3. In the desktop app, browse to `Library.xml` in the folder that holds your Apple Music library, usually `Music/Music` in your home folder.
+
+**iTunes (Windows, or older Macs):**
+
+1. Open Edit → Preferences → **Advanced** (on a Mac: iTunes → Preferences → **Advanced**).
+2. Tick **Share iTunes Library XML with other applications**.
+3. In the desktop app, browse to `iTunes Library.xml` in your iTunes folder, usually `Music\iTunes` in your user folder.
 
 ## Screenshots
 
