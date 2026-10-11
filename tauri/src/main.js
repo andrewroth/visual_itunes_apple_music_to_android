@@ -11,6 +11,7 @@ console.log("MusicSync frontend loaded:", MUSICSYNC_BUILD);
 
 import { invoke } from "https://cdn.jsdelivr.net/npm/@tauri-apps/api@2/core/+esm";
 import { listen } from "https://cdn.jsdelivr.net/npm/@tauri-apps/api@2/event/+esm";
+import { createScanCycle, deviceDeadAction } from "./scan_cycle.js";
 
 // Native file-picker dialog via the Tauri dialog plugin's own command.
 // No external JS module needed — we just call the Rust command directly.
@@ -1000,65 +1001,29 @@ async function forgetPairing() {
 // Visibility of the "Forget pairing" button is independent — it shows
 // whenever there is a stored pairing (regardless of search state).
 
-// Repeating-broadcast state. While the searching banner is up we fire a
-// UDP probe every 2 seconds. After 30 seconds with no discovery_found
-// event, swap the banner to "No MusicSync Apps Found" with a Rescan
-// button so the user knows nothing was found and can retry on demand.
-let _scanIntervalId = null;
-let _scanTimeoutId = null;
-// Subnet-sweep retry timer. Hoisted to module scope so stopScanCycle
-// can clear it; previously a local const that leaked when
-// startScanCycle was re-entered (e.g. device_dead followed by another
-// trigger), causing duplicate sweeps every cycle.
-let _sweepIntervalId = null;
+// Search scheduling (UDP probe every 2s, subnet sweep every 10s, one
+// try of the remembered manual address, 30s give-up) lives in
+// scan_cycle.js so it can be unit-tested. It keeps running until the
+// heartbeat confirms a live phone; markDeviceAlive() stops it.
+const _scanCycle = createScanCycle({
+  lanScan: () => { invoke("start_lan_scan").catch(() => {}); },
+  subnetSweep: () => { invoke("start_subnet_sweep").catch(() => {}); },
+  // tryRememberedManual dedups via _triedDevices, so a dead address is
+  // only tried once per search.
+  tryManual: () => { tryRememberedManual(); },
+  isAlive: () => _heartbeatAlive,
+  onNoneFound: () => showNoneFoundState(),
+});
 
 function stopScanCycle() {
-  if (_scanIntervalId != null) {
-    clearInterval(_scanIntervalId);
-    _scanIntervalId = null;
-  }
-  if (_scanTimeoutId != null) {
-    clearTimeout(_scanTimeoutId);
-    _scanTimeoutId = null;
-  }
-  if (_sweepIntervalId != null) {
-    clearInterval(_sweepIntervalId);
-    _sweepIntervalId = null;
-  }
+  _scanCycle.stop();
 }
 
 function startScanCycle() {
-  stopScanCycle();
-  // Initial scan immediately, then every 2 seconds.
-  invoke("start_lan_scan").catch(() => {});
-  _scanIntervalId = setInterval(() => {
-    invoke("start_lan_scan").catch(() => {});
-  }, 2000);
-  // Fire the manual fallback and the subnet sweep RIGHT NOW alongside
-  // mDNS, not after a delay. They run in parallel; whichever finds
-  // the phone first wins.
-  if (!window._wsUrl) {
-    tryRememberedManual();
-    invoke("start_subnet_sweep").catch(() => {});
-  }
-  // Re-sweep every 10s while we're still in searching mode. The mDNS
-  // cycle is fast and cheap; the sweep is bounded and only fires
-  // again when we haven't found anything.
-  _sweepIntervalId = setInterval(() => {
-    if (window._wsUrl) {
-      clearInterval(_sweepIntervalId);
-      _sweepIntervalId = null;
-      return;
-    }
-    invoke("start_subnet_sweep").catch(() => {});
-  }, 10_000);
-  _scanTimeoutId = setTimeout(() => {
-    // 30 seconds elapsed with no hit. Final attempt at the remembered
-    // manual address before declaring nothing found.
-    stopScanCycle();
-    if (!window._wsUrl && tryRememberedManual()) return;
-    showNoneFoundState();
-  }, 30_000);
+  // After a dropped connection _wsUrl is kept on purpose (see
+  // device_dead), and the heartbeat keeps retrying it. Don't replace it
+  // with the remembered manual address in that case.
+  _scanCycle.start({ tryManual: !window._wsUrl });
 }
 
 // Single source of truth for "is the address banner currently showing
@@ -1114,9 +1079,10 @@ function showNoneFoundState() {
 // haven't turned anything up — direct TCP to a remembered IP often
 // works through router/firewall configs that drop broadcast packets.
 //
-// Returns true if a probe was kicked off. The actual connect goes
-// through the same heartbeat path as a real discovery_found, so a
-// dead address will cleanly drop back to searching via device_dead.
+// Returns true if a probe was kicked off. Nothing has answered at this
+// address yet, so it's shown as "trying" (yellow) and the search keeps
+// running alongside it; the first heartbeat pong turns it green and
+// stops the search via markDeviceAlive().
 function tryRememberedManual() {
   const ip = localStorage.getItem(LS_MANUAL_IP);
   const port = localStorage.getItem(LS_MANUAL_PORT) || DEFAULT_WS_PORT;
@@ -1125,8 +1091,7 @@ function tryRememberedManual() {
   if (_triedDevices.has(wsUrl)) return false;
   _triedDevices.add(wsUrl);
   appendLog(`Trying last manual address: ${wsUrl}`);
-  $("ws_url").value = wsUrl;
-  showFoundState("last manual entry", wsUrl);
+  showTryingState("last manual entry", wsUrl);
   if (lastSettings.device_token) {
     scanDevice().catch(() => { /* logged by scanDevice */ });
   } else {
@@ -1145,6 +1110,19 @@ function renderFoundDot(colorClass /* "success" | "warning" */) {
     `<span class="text-${colorClass}">●</span> ` +
     `<strong>${escapeHtml(deviceName)}</strong> ` +
     `<span class="text-muted small">${escapeHtml(wsUrl)}</span>`;
+}
+
+// Like showFoundState, but for an address nobody has answered at yet:
+// yellow dot, and the search cycle is left running.
+function showTryingState(deviceName, wsUrl) {
+  $("ws_url").value = wsUrl;
+  $("ws_url_display").style.display = "";
+  $("ws_url").style.display = "none";
+  window._wsUrl = wsUrl;
+  window._foundDeviceName = deviceName;
+  renderFoundDot("warning");
+  invoke("start_heartbeat", { wsUrl }).catch(() => {});
+  renderForgetPairingBtn();
 }
 
 function showFoundState(deviceName, wsUrl) {
@@ -1355,8 +1333,13 @@ listen("heartbeat_token_rejected", async () => {
 });
 
 listen("device_dead", () => {
-  if (_heartbeatAlive) {
-    _heartbeatAlive = false;
+  const action = deviceDeadAction({
+    wasAlive: _heartbeatAlive,
+    searching: _scanCycle.running(),
+  });
+  if (action === "ignore") return;
+  _heartbeatAlive = false;
+  if (action === "rescan-clear") {
     appendLog(`Lost connection to ${window._foundDeviceName || "phone"}. Re-scanning…`);
     // Clear the discovery dedup set so the next discovery_found event
     // re-triggers the connect path. KEEP _wsUrl + _foundDeviceName so
@@ -1364,11 +1347,13 @@ listen("device_dead", () => {
     // reconnect loop) can flip the indicator straight back to green
     // via markDeviceAlive() — with the correct name preserved.
     _triedDevices.clear();
-    setSyncEnabled(false);
-    showSearchingState();
-    // Kick a fresh LAN broadcast so we don't wait for the next mDNS tick.
-    invoke("start_lan_scan").catch(() => {});
+  } else {
+    // "rescan-keep": the address we were showing never answered.
+    // Keep _triedDevices so it isn't retried in a loop.
+    appendLog(`No answer at ${window._wsUrl || "phone address"}. Re-scanning…`);
   }
+  setSyncEnabled(false);
+  showSearchingState();
 });
 
 // The phone pushes DEVICE_RENAMED over the persistent heartbeat WS
@@ -1640,15 +1625,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   // dropped, leaving the address bar stuck on the "Scanning…" → "No
   // … Apps Found" path even while sync proceeds in the background.
   try { await invoke("start_recent_probe"); } catch (e) { appendLog(`Recent-probe failed: ${e}`); }
-  // Try the remembered manual entry immediately as well — most users
-  // who once typed an address will hit it again next launch, and a
-  // direct TCP probe gets through where broadcast / mDNS doesn't.
-  if (!window._wsUrl) tryRememberedManual();
-  // And launch a subnet sweep in parallel for the case where the
-  // phone moved to a new IP overnight. Cheap and bounded.
-  invoke("start_subnet_sweep").catch(() => {});
-  // showSearchingState() (called above) already kicked off the
-  // every-2-seconds UDP broadcast cycle, so no need to fire one here.
+  // showSearchingState() (called above) already started the search
+  // cycle: UDP broadcasts, subnet sweep, and the remembered manual
+  // address, so nothing more to kick off here.
   // Attempt initial load if a library path is set.
   if ($("library_path").value) await loadLibrary();
 });

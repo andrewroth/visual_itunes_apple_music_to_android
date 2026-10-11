@@ -90,6 +90,22 @@ jobs:
             tauri/target/*/release/bundle/**/*
           if-no-files-found: warn
 
+  frontend-tests:
+    name: frontend-tests
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: run frontend unit tests
+        working-directory: tauri
+        run: npm test
+
   android:
     name: android-apk
     runs-on: ubuntu-22.04
