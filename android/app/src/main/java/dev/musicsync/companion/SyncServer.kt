@@ -579,15 +579,29 @@ class SyncServer(private val config: Config) {
             // same).
             val parts = safePath.split('/').filter { it.isNotEmpty() }
             var node: DocumentFile? = root
-            for (segment in parts) {
+            // Folders between the music root and the file, outermost first.
+            val parents = mutableListOf<DocumentFile>()
+            for ((i, segment) in parts.withIndex()) {
                 node = node?.findFile(segment)
                 if (node == null) {
                     // Already gone.
                     send(session, ServerMessage.FileDeleteOk(msg.path))
                     return
                 }
+                if (i < parts.lastIndex) parents += node
             }
             if (node?.delete() == true) {
+                // Don't leave empty album/artist folders behind. Best
+                // effort: the file is gone either way.
+                try {
+                    pruneEmptyParents(
+                        parents,
+                        isEmpty = { it.isDirectory && it.listFiles().isEmpty() },
+                        delete = { it.delete() },
+                    )
+                } catch (e: Exception) {
+                    config.onEvent("couldn't remove empty folder after deleting ${msg.path}: ${e.message}")
+                }
                 send(session, ServerMessage.FileDeleteOk(msg.path))
             } else {
                 send(session, ServerMessage.FileDeleteErr(msg.path, "delete failed"))

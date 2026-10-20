@@ -12,6 +12,7 @@ console.log("MusicSync frontend loaded:", MUSICSYNC_BUILD);
 import { invoke } from "https://cdn.jsdelivr.net/npm/@tauri-apps/api@2/core/+esm";
 import { listen } from "https://cdn.jsdelivr.net/npm/@tauri-apps/api@2/event/+esm";
 import { createScanCycle, deviceDeadAction } from "./scan_cycle.js";
+import { cleanupLabel, everythingElseLabel, confirmDeleteLines } from "./delete_ui.js";
 
 // Native file-picker dialog via the Tauri dialog plugin's own command.
 // No external JS module needed — we just call the Rust command directly.
@@ -286,6 +287,7 @@ function renderPlaylists(library) {
   renderMissingPlaylists(library);
   const tbody = $("playlists").querySelector("tbody");
   tbody.innerHTML = "";
+  const deleteEverythingElse = !!(library.everything_else && library.everything_else.checked);
   for (const p of library.playlists) {
     const tr = document.createElement("tr");
     tr.setAttribute("data-id", p.playlist_id);
@@ -300,17 +302,26 @@ function renderPlaylists(library) {
           : `${p.tracks_to_copy}`;
     }
     // Per-row Delete column. Only meaningful for UNCHECKED playlists
-    // that have device tracks no longer covered by any checked playlist
-    // (cleanup_count > 0). For checked rows, blank.
+    // that still have something on the phone: tracks no checked
+    // playlist covers, and/or the playlist's own .m3u file. For checked
+    // rows, blank. When the "everything else" box is ticked these are
+    // already included, so they show ticked and locked.
     let deleteCell = "";
-    if (!p.checked && typeof p.cleanup_count === "number" && p.cleanup_count > 0) {
-      const checked = p.cleanup_checked ? "checked" : "";
+    const label = p.checked ? "" : cleanupLabel({
+      tracks: p.cleanup_count,
+      playlistFile: p.cleanup_playlist_file,
+    });
+    if (label) {
+      const checked = p.cleanup_checked || deleteEverythingElse ? "checked" : "";
+      const locked = deleteEverythingElse ? "disabled" : "";
+      const tip = deleteEverythingElse
+        ? "Included in “Everything not in a synced playlist” below."
+        : "Delete this playlist from the phone, along with its tracks that aren't in any playlist being synced.";
       deleteCell =
-        `<label class="d-inline-flex align-items-center gap-1 m-0" ` +
-        `title="Delete tracks already on the phone that aren't in any playlist being synced.">` +
+        `<label class="d-inline-flex align-items-center gap-1 m-0" title="${tip}">` +
         `<input type="checkbox" class="form-check-input cleanup-checkbox m-0" ` +
-        `data-playlist-id="${escapeHtml(p.playlist_id)}" ${checked}>` +
-        `<span>Delete ${p.cleanup_count} Track${p.cleanup_count === 1 ? "" : "s"}</span>` +
+        `data-playlist-id="${escapeHtml(p.playlist_id)}" ${checked} ${locked}>` +
+        `<span>${label}</span>` +
         `</label>`;
     }
     tr.innerHTML =
@@ -341,15 +352,43 @@ function renderPlaylists(library) {
   if (typeof library.orphan_count === "number" && library.orphan_count > 0) {
     const tr = document.createElement("tr");
     tr.classList.add("table-warning");
-    const checked = lastSettings.delete_unused_songs ? "checked" : "";
+    const checked = lastSettings.delete_unused_songs || deleteEverythingElse ? "checked" : "";
+    const locked = deleteEverythingElse ? "disabled" : "";
     tr.innerHTML =
       `<td colspan="3"><i>Tracks not in your Music Library</i></td>` +
       `<td>` +
       `<label class="d-inline-flex align-items-center gap-1 m-0" ` +
       `title="Tracks on the phone whose size doesn't match anything in your Music Library. ` +
       `Usually leftovers from a previous sync after the library shrunk, or manually-added files.">` +
-      `<input type="checkbox" class="form-check-input m-0" id="orphan_delete_checkbox" ${checked}>` +
-      `<span>Delete ${library.orphan_count} Track${library.orphan_count === 1 ? "" : "s"}</span>` +
+      `<input type="checkbox" class="form-check-input m-0" id="orphan_delete_checkbox" ${checked} ${locked}>` +
+      `<span>Delete ${library.orphan_count} track${library.orphan_count === 1 ? "" : "s"}</span>` +
+      `</label>` +
+      `</td>` +
+      `<td></td>` +
+      `<td></td>`;
+    tbody.appendChild(tr);
+  }
+
+  // "Everything else" row: one box that makes the phone mirror the
+  // synced playlists. Covers the orphan row, every unchecked playlist's
+  // row, and library tracks that are in no playlist at all. Stays
+  // visible while ticked, even with nothing to delete, so it can be
+  // turned off again.
+  const ee = library.everything_else;
+  if (ee && (ee.checked || ee.tracks > 0 || ee.playlists > 0)) {
+    const tr = document.createElement("tr");
+    tr.classList.add("table-warning");
+    tr.innerHTML =
+      `<td colspan="3"><i>Everything not in a synced playlist</i></td>` +
+      `<td>` +
+      `<label class="d-inline-flex align-items-center gap-1 m-0" ` +
+      `title="On every sync, delete everything in the phone's music folder that isn't part of a ` +
+      `playlist you're syncing: tracks from unticked playlists, tracks in no playlist, files not in ` +
+      `your Music Library, and the playlist files of unticked or removed playlists. Playlists ` +
+      `created on the phone itself are kept.">` +
+      `<input type="checkbox" class="form-check-input m-0" id="everything_else_checkbox" ` +
+      `${ee.checked ? "checked" : ""}>` +
+      `<span>${everythingElseLabel(ee)}</span>` +
       `</label>` +
       `</td>` +
       `<td></td>` +
@@ -363,6 +402,18 @@ function renderPlaylists(library) {
       e.stopPropagation();
       const id = cb.getAttribute("data-playlist-id");
       const updated = await invoke("toggle_cleanup_playlist", { playlistId: id });
+      renderPlaylists(updated);
+      showSyncPreview();
+    });
+  }
+  const everythingCb = $("everything_else_checkbox");
+  if (everythingCb) {
+    everythingCb.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const updated = await invoke("set_delete_everything_else", {
+        value: everythingCb.checked,
+      });
+      lastSettings.delete_everything_else = everythingCb.checked;
       renderPlaylists(updated);
       showSyncPreview();
     });
@@ -412,36 +463,10 @@ async function loadLibrary() {
   }
 }
 
-// List of planned deletes — built from missing playlists with action=delete
-// plus (if checkbox) unused songs. Used for the confirm modal.
+// What the confirm modal lists: taken from the backend's sync preview,
+// so it is exactly what run_sync will delete.
 function plannedDeletes() {
-  const out = { playlists: [], songs: [] };
-  const missing = (lastLibraryView && lastLibraryView.missing_playlists) || [];
-  for (const m of missing) {
-    if (m.action === "delete") out.playlists.push(m.name);
-  }
-  if (
-    lastSettings.delete_unused_songs &&
-    lastLibraryView &&
-    typeof lastLibraryView.orphan_count === "number" &&
-    lastLibraryView.orphan_count > 0
-  ) {
-    out.songs.push(
-      `${lastLibraryView.orphan_count} track${
-        lastLibraryView.orphan_count === 1 ? "" : "s"
-      } not in your Music Library`,
-    );
-  }
-  // Per-playlist cleanups, summed per playlist for the confirm modal.
-  const pls = (lastLibraryView && lastLibraryView.playlists) || [];
-  for (const p of pls) {
-    if (p.cleanup_checked && p.cleanup_count > 0) {
-      out.songs.push(
-        `${p.cleanup_count} track${p.cleanup_count === 1 ? "" : "s"} from "${p.name}"`,
-      );
-    }
-  }
-  return out;
+  return confirmDeleteLines(lastLibraryView && lastLibraryView.preview);
 }
 
 let confirmSyncModalInstance = null;
@@ -451,14 +476,9 @@ function showConfirmSyncModal(planned) {
   }
   const list = $("confirm_sync_list");
   list.innerHTML = "";
-  for (const p of planned.playlists) {
+  for (const line of planned) {
     const li = document.createElement("li");
-    li.textContent = `Playlist file: ${p}.m3u`;
-    list.appendChild(li);
-  }
-  for (const s of planned.songs) {
-    const li = document.createElement("li");
-    li.textContent = s;
+    li.textContent = line;
     list.appendChild(li);
   }
   return new Promise((resolve) => {
@@ -488,7 +508,7 @@ async function runSync() {
     await loadLibrary();
 
     const planned = plannedDeletes();
-    if (planned.playlists.length > 0 || planned.songs.length > 0) {
+    if (planned.length > 0) {
       const ok = await showConfirmSyncModal(planned);
       if (!ok) {
         setStatusMessage("warning", "Sync cancelled.");

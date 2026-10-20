@@ -86,6 +86,13 @@ pub struct Settings {
     #[serde(rename = "delete_unused_songs", default)]
     pub delete_unused_songs: bool,
 
+    /// Whether every sync should delete everything on the phone that
+    /// isn't part of a currently-checked playlist: files not in the
+    /// library, library tracks no checked playlist contains, and the
+    /// playlist files of unchecked or removed playlists.
+    #[serde(rename = "delete_everything_else", default)]
+    pub delete_everything_else: bool,
+
     /// Per-playlist "clean up this playlist's tracks on next sync" flags.
     /// Only meaningful for currently-UNCHECKED playlists — clicking the
     /// Clean-up checkbox on a row queues those tracks for deletion at

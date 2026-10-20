@@ -11,7 +11,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use musicsync_core::cleanup::{
+    deletable_playlist_file, plan_deletes, ClassifiedFiles, DeleteOptions, DeletePlan,
+    MissingPlaylist,
+};
 use musicsync_core::library::Library;
+use musicsync_core::matching::DeviceFile;
 use musicsync_core::settings::{PlaylistAction, RememberedPlaylist, Settings};
 use std::io::Write as _;
 use serde::Serialize;
@@ -68,6 +73,9 @@ struct LastScan {
     /// path entries inside its .m3u. Used to populate the "Device # Tracks"
     /// column matching the Ruby app's table.
     device_playlist_line_counts: std::collections::HashMap<String, usize>,
+    /// Same key as above → the playlist file's path on the phone (what
+    /// FILE_DELETE expects). Only playlists in this map can be deleted.
+    device_playlist_paths: std::collections::HashMap<String, String>,
     timestamp_ms: u64,
     music_root: String,
 }
@@ -92,9 +100,21 @@ struct PlaylistView {
     /// playlist (so syncing wouldn't put them back). `None` until a
     /// scan has been done, or for checked playlists.
     cleanup_count: Option<usize>,
+    /// For UNCHECKED playlists only: true when this playlist's .m3u is
+    /// on the phone and the Delete box would remove it too.
+    cleanup_playlist_file: bool,
     /// True iff the user has ticked the per-row Clean-up checkbox for
     /// this playlist. Only meaningful for unchecked playlists.
     cleanup_checked: bool,
+}
+
+/// The "everything not in a synced playlist" row: what ticking it would
+/// delete right now.
+#[derive(Serialize, Clone)]
+struct EverythingElseView {
+    tracks: usize,
+    playlists: usize,
+    checked: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -104,6 +124,8 @@ struct LibraryView {
     /// these aren't owned by any playlist. The orphan row in the table
     /// surfaces this count + checkbox. `None` until a scan has happened.
     orphan_count: Option<usize>,
+    /// `None` until a scan has happened.
+    everything_else: Option<EverythingElseView>,
     /// Pre-computed preview of what `run_sync` would actually do right
     /// now. None until a scan has happened. Properly dedupes across
     /// playlists (a track in two checked playlists counts once).
@@ -234,7 +256,7 @@ fn load_library(app: AppHandle, state: State<Mutex<AppState>>) -> Result<Library
 
     let (playlists, missing) = build_views_with_scan(&lib, &guard.settings, guard.last_scan.as_ref());
     let preview = guard.last_scan.as_ref().map(|s| compute_preview(&lib, &guard.settings, s));
-    let view = library_view(&lib, library_path, mtime_ms, playlists, missing, guard.last_scan.as_ref().map(|s| s.unused_device_paths.len()), preview);
+    let view = library_view(&lib, library_path, mtime_ms, playlists, missing, &guard.settings, guard.last_scan.as_ref(), preview);
     guard.library = Some(lib);
     guard.library_mtime_ms = mtime_ms;
     Ok(view)
@@ -296,6 +318,9 @@ fn toggle_playlist(
         .collect();
     new_checked.extend(checked_ids_in_library);
     guard.settings.checked_playlist_ids = new_checked;
+    if currently_checked {
+        cancel_playlist_delete(&mut guard.settings, &playlist_id);
+    }
 
     // Add a remembered-playlist record on first check; ignore (don't add)
     // when toggling off. Forget is the explicit way to remove.
@@ -320,7 +345,7 @@ fn toggle_playlist(
     let lib_ref = guard.library.as_ref().unwrap();
     let (playlists_snapshot, missing) = build_views_with_scan(lib_ref, &guard.settings, guard.last_scan.as_ref());
     let preview = guard.last_scan.as_ref().map(|s| compute_preview(lib_ref, &guard.settings, s));
-    let view = library_view(lib_ref, library_path_str, mtime_ms, playlists_snapshot, missing, guard.last_scan.as_ref().map(|s| s.unused_device_paths.len()), preview);
+    let view = library_view(lib_ref, library_path_str, mtime_ms, playlists_snapshot, missing, &guard.settings, guard.last_scan.as_ref(), preview);
 
     let settings_path = guard.settings_path.clone();
     let to_save = guard.settings.clone();
@@ -349,7 +374,7 @@ fn forget_playlist(
         .ok_or_else(|| "library not loaded".to_string())?;
     let (playlists_snapshot, missing) = build_views_with_scan(lib, &guard.settings, guard.last_scan.as_ref());
     let preview = guard.last_scan.as_ref().map(|s| compute_preview(lib, &guard.settings, s));
-    Ok(library_view(lib, library_path_str, mtime_ms, playlists_snapshot, missing, guard.last_scan.as_ref().map(|s| s.unused_device_paths.len()), preview))
+    Ok(library_view(lib, library_path_str, mtime_ms, playlists_snapshot, missing, &guard.settings, guard.last_scan.as_ref(), preview))
 }
 
 #[tauri::command]
@@ -380,7 +405,7 @@ fn set_playlist_action(
         .ok_or_else(|| "library not loaded".to_string())?;
     let (playlists_snapshot, missing) = build_views_with_scan(lib, &guard.settings, guard.last_scan.as_ref());
     let preview = guard.last_scan.as_ref().map(|s| compute_preview(lib, &guard.settings, s));
-    Ok(library_view(lib, library_path_str, mtime_ms, playlists_snapshot, missing, guard.last_scan.as_ref().map(|s| s.unused_device_paths.len()), preview))
+    Ok(library_view(lib, library_path_str, mtime_ms, playlists_snapshot, missing, &guard.settings, guard.last_scan.as_ref(), preview))
 }
 
 /// Compute the playlist and missing-playlist view-models from current state.
@@ -393,19 +418,7 @@ fn build_views_with_scan(
 ) -> (Vec<PlaylistView>, Vec<MissingPlaylistView>) {
     let have_scan = last_scan.is_some();
 
-    // Set of track IDs that ARE in some currently-checked playlist —
-    // anything outside this set is a deletion candidate for cleanup.
-    let checked_track_ids: std::collections::HashSet<&str> = lib
-        .playlists
-        .iter()
-        .filter(|p| p.checked)
-        .flat_map(|p| p.track_ids.iter().map(|s| s.as_str()))
-        .collect();
-
-    // Sizes on device for quick "is this track actually on the phone?" lookup.
-    let device_sizes: std::collections::HashSet<u64> = last_scan
-        .map(|s| s.device_files.iter().map(|(_, sz)| *sz).collect())
-        .unwrap_or_default();
+    let classified = last_scan.map(|scan| classify_scan(lib, scan));
 
     let cleanup_flagged: std::collections::HashSet<&str> = settings
         .cleanup_playlist_ids
@@ -430,19 +443,17 @@ fn build_views_with_scan(
             let device_count = last_scan
                 .and_then(|s| s.device_playlist_line_counts.get(&p.name).copied());
 
-            // Cleanup count: only meaningful for unchecked playlists.
-            // Count this playlist's tracks that are on the device AND
-            // not in any other checked playlist.
-            let cleanup_count = if have_scan && !p.checked {
-                let mut n = 0usize;
-                for tid in &p.track_ids {
-                    if checked_track_ids.contains(tid.as_str()) { continue; }
-                    if let Some(t) = lib.tracks.get(tid) {
-                        if device_sizes.contains(&t.size) { n += 1; }
-                    }
-                }
-                Some(n)
-            } else { None };
+            // Cleanup: only meaningful for unchecked playlists. Counts
+            // this playlist's files on the phone that no checked playlist
+            // wants, and whether its .m3u is there to remove too.
+            let (cleanup_count, cleanup_playlist_file) = match (&classified, last_scan) {
+                (Some(c), Some(scan)) if !p.checked => (
+                    Some(c.playlist_unwanted_paths(p).len()),
+                    deletable_playlist_file(&p.name, &lib.playlists, &scan.device_playlist_paths)
+                        .is_some(),
+                ),
+                _ => (None, false),
+            };
 
             PlaylistView {
                 playlist_id: p.persistent_id.clone(),
@@ -452,6 +463,7 @@ fn build_views_with_scan(
                 tracks_to_copy: to_copy,
                 checked: p.checked,
                 cleanup_count,
+                cleanup_playlist_file,
                 cleanup_checked: cleanup_flagged.contains(p.persistent_id.as_str()),
             }
         })
@@ -499,67 +511,15 @@ async fn run_sync(
             .library
             .as_ref()
             .ok_or_else(|| "library not loaded".to_string())?;
-        // Delete-list = remembered playlists with action=Delete. We use
-        // `<name>.m3u` as the on-device filename, matching how Playlist
-        // generation in core/src/playlist.rs writes it.
-        let pl_to_delete: Vec<String> = guard
-            .settings
-            .remembered_playlists
-            .iter()
-            .filter(|r| matches!(r.action, PlaylistAction::Delete))
-            .map(|r| format!("{}.m3u", r.name))
-            .collect();
-        // Unused-track delete-list comes from the last_scan cache and is
-        // only honored when the user has explicitly opted in.
-        let mut tr_to_delete: Vec<String> = if guard.settings.delete_unused_songs {
-            guard
-                .last_scan
-                .as_ref()
-                .map(|s| s.unused_device_paths.clone())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        // Per-playlist cleanup: for each playlist whose Delete checkbox
-        // is ticked, queue its tracks that are on the phone but not in
-        // any currently-checked playlist.
-        let cleanup_ids: std::collections::HashSet<&str> = guard
-            .settings
-            .cleanup_playlist_ids
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
-        let checked_track_ids: std::collections::HashSet<&str> = lib
-            .playlists
-            .iter()
-            .filter(|p| p.checked)
-            .flat_map(|p| p.track_ids.iter().map(|s| s.as_str()))
-            .collect();
-        let device_path_by_size: std::collections::HashMap<u64, String> = guard
+        // Deletes come from the same plan the preview showed. Without a
+        // scan we don't know what's on the phone, so nothing is deleted.
+        let plan = guard
             .last_scan
             .as_ref()
-            .map(|s| {
-                let mut m = std::collections::HashMap::new();
-                for (p, sz) in &s.device_files {
-                    if p.to_ascii_lowercase().ends_with(".m3u") { continue; }
-                    m.entry(*sz).or_insert_with(|| p.clone());
-                }
-                m
-            })
+            .map(|scan| delete_plan(lib, &guard.settings, scan))
             .unwrap_or_default();
-        for p in &lib.playlists {
-            if !cleanup_ids.contains(p.persistent_id.as_str()) { continue; }
-            for tid in &p.track_ids {
-                if checked_track_ids.contains(tid.as_str()) { continue; }
-                if let Some(t) = lib.tracks.get(tid) {
-                    if let Some(path) = device_path_by_size.get(&t.size) {
-                        tr_to_delete.push(path.clone());
-                    }
-                }
-            }
-        }
-        tr_to_delete.sort();
-        tr_to_delete.dedup();
+        let pl_to_delete = plan.playlist_files;
+        let tr_to_delete = plan.track_paths;
         (
             lib.tracks.clone(),
             lib.playlists.clone(),
@@ -608,6 +568,15 @@ async fn run_sync(
     // Write the updated on_device flags back into app state.
     {
         let mut guard = state.lock().unwrap();
+        // Per-playlist Delete boxes are one-shot: once the deletes have
+        // gone through, clear them so they can't fire again unnoticed if
+        // those tracks later return to the phone. Kept on error so the
+        // user can retry.
+        if clear_one_shot_deletes(&mut guard.settings, &report) {
+            if let Err(e) = guard.settings.save(&guard.settings_path) {
+                tracing::warn!("couldn't save settings after sync: {e}");
+            }
+        }
         if let Some(lib) = guard.library.as_mut() {
             for (id, t) in tracks_clone {
                 if let Some(existing) = lib.tracks.get_mut(&id) {
@@ -665,11 +634,18 @@ fn format_sync_summary(report: &sync::SyncReport, elapsed: std::time::Duration) 
     let mut summary = parts.join(" · ");
     summary.push('.');
     if !report.errors.is_empty() {
+        // A dropped connection can fail every remaining delete; don't
+        // flood the status line with all of them.
+        const SHOWN: usize = 5;
+        let mut shown = report.errors.iter().take(SHOWN).cloned().collect::<Vec<_>>().join("; ");
+        if report.errors.len() > SHOWN {
+            shown.push_str(&format!("; and {} more", report.errors.len() - SHOWN));
+        }
         summary.push_str(&format!(
             " {} error{}: {}",
             report.errors.len(),
             if report.errors.len() == 1 { "" } else { "s" },
-            report.errors.join("; "),
+            shown,
         ));
     }
     summary
@@ -871,6 +847,8 @@ async fn scan_device(
     // Ruby's device_tracks_count semantics.
     let mut device_playlist_line_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
+    let mut device_playlist_paths: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for p in &device_playlists {
         let n = p
             .content
@@ -880,14 +858,8 @@ async fn scan_device(
                 !t.is_empty() && t != "#EXTM3U" && !t.starts_with('#')
             })
             .count();
-        let basename = p
-            .name
-            .rsplit('/')
-            .next()
-            .unwrap_or(&p.name)
-            .strip_suffix(".m3u")
-            .unwrap_or(&p.name)
-            .to_string();
+        let basename = device_playlist_basename(&p.name);
+        device_playlist_paths.insert(basename.clone(), p.name.clone());
         device_playlist_line_counts.insert(basename, n);
     }
 
@@ -1019,6 +991,7 @@ async fn scan_device(
             device_files,
             unused_device_paths: unused_paths,
             device_playlist_line_counts,
+            device_playlist_paths,
             timestamp_ms,
             music_root,
         });
@@ -1298,16 +1271,46 @@ fn set_delete_unused_songs(
     let (playlists, missing) =
         build_views_with_scan(lib, &guard.settings, guard.last_scan.as_ref());
     let preview = guard.last_scan.as_ref().map(|s| compute_preview(lib, &guard.settings, s));
-    Ok(LibraryView {
-        track_count: lib.tracks.len(),
-        orphan_count: guard.last_scan.as_ref().map(|s| s.unused_device_paths.len()),
-        preview,
+    Ok(library_view(
+        lib,
+        guard.settings.library_path.clone().unwrap_or_default(),
+        mtime_ms,
         playlists,
-        music_folder: lib.music_folder.clone(),
-        library_path: guard.settings.library_path.clone().unwrap_or_default(),
-        library_mtime_ms: mtime_ms,
-        missing_playlists: missing,
-    })
+        missing,
+        &guard.settings,
+        guard.last_scan.as_ref(),
+        preview,
+    ))
+}
+
+/// The "everything not in a synced playlist" row's checkbox. Persists,
+/// like `delete_unused_songs`, so the phone keeps mirroring the selection.
+#[tauri::command]
+fn set_delete_everything_else(
+    value: bool,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<LibraryView, String> {
+    let mut guard = state.lock().unwrap();
+    guard.settings.delete_everything_else = value;
+    guard.settings.save(&guard.settings_path).map_err(|e| e.to_string())?;
+    let mtime_ms = guard.library_mtime_ms;
+    let lib = guard
+        .library
+        .as_ref()
+        .ok_or_else(|| "library not loaded".to_string())?;
+    let (playlists, missing) =
+        build_views_with_scan(lib, &guard.settings, guard.last_scan.as_ref());
+    let preview = guard.last_scan.as_ref().map(|s| compute_preview(lib, &guard.settings, s));
+    Ok(library_view(
+        lib,
+        guard.settings.library_path.clone().unwrap_or_default(),
+        mtime_ms,
+        playlists,
+        missing,
+        &guard.settings,
+        guard.last_scan.as_ref(),
+        preview,
+    ))
 }
 
 /// Toggle the per-row "clean up this playlist's tracks" flag. Only
@@ -1341,16 +1344,16 @@ fn toggle_cleanup_playlist(
     let (playlists, missing) =
         build_views_with_scan(lib, &guard.settings, guard.last_scan.as_ref());
     let preview = guard.last_scan.as_ref().map(|s| compute_preview(lib, &guard.settings, s));
-    Ok(LibraryView {
-        track_count: lib.tracks.len(),
-        orphan_count: guard.last_scan.as_ref().map(|s| s.unused_device_paths.len()),
-        preview,
+    Ok(library_view(
+        lib,
+        guard.settings.library_path.clone().unwrap_or_default(),
+        mtime_ms,
         playlists,
-        music_folder: lib.music_folder.clone(),
-        library_path: guard.settings.library_path.clone().unwrap_or_default(),
-        library_mtime_ms: mtime_ms,
-        missing_playlists: missing,
-    })
+        missing,
+        &guard.settings,
+        guard.last_scan.as_ref(),
+        preview,
+    ))
 }
 
 /// Start an open-ended mDNS browse on the LAN for `_musicsync._tcp.local.`
@@ -2228,12 +2231,29 @@ fn library_view(
     library_mtime_ms: Option<u64>,
     playlists: Vec<PlaylistView>,
     missing_playlists: Vec<MissingPlaylistView>,
-    orphan_count: Option<usize>,
+    settings: &Settings,
+    last_scan: Option<&LastScan>,
     preview: Option<SyncPreview>,
 ) -> LibraryView {
+    let everything_else = last_scan.map(|scan| {
+        let mut all = delete_options(lib, settings);
+        all.everything_else = true;
+        let plan = plan_deletes(
+            &classify_scan(lib, scan),
+            &lib.playlists,
+            &scan.device_playlist_paths,
+            &all,
+        );
+        EverythingElseView {
+            tracks: plan.track_paths.len(),
+            playlists: plan.playlist_files.len(),
+            checked: settings.delete_everything_else,
+        }
+    });
     LibraryView {
         track_count: lib.tracks.len(),
-        orphan_count,
+        orphan_count: last_scan.map(|s| s.unused_device_paths.len()),
+        everything_else,
         preview,
         playlists,
         music_folder: lib.music_folder.clone(),
@@ -2241,6 +2261,68 @@ fn library_view(
         library_mtime_ms,
         missing_playlists,
     }
+}
+
+/// "Music/Playlists/Old.m3u" → "Old": the key the scan stores device
+/// playlists under, matching library playlist names.
+fn device_playlist_basename(path: &str) -> String {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    file.strip_suffix(".m3u").unwrap_or(file).to_string()
+}
+
+/// After a sync, clear the per-playlist Delete boxes (they are one-shot)
+/// unless anything failed, so the user can retry. True if settings changed.
+fn clear_one_shot_deletes(settings: &mut Settings, report: &sync::SyncReport) -> bool {
+    if !report.errors.is_empty() || settings.cleanup_playlist_ids.is_empty() {
+        return false;
+    }
+    settings.cleanup_playlist_ids.clear();
+    true
+}
+
+/// Syncing a playlist again cancels any delete queued while it was unchecked.
+fn cancel_playlist_delete(settings: &mut Settings, playlist_id: &str) {
+    settings.cleanup_playlist_ids.retain(|id| id != playlist_id);
+}
+
+fn classify_scan(lib: &Library, scan: &LastScan) -> ClassifiedFiles {
+    let dfs: Vec<DeviceFile> = scan
+        .device_files
+        .iter()
+        .map(|(p, s)| DeviceFile { path: p.clone(), size: *s })
+        .collect();
+    ClassifiedFiles::new(&lib.tracks, &lib.playlists, &dfs)
+}
+
+/// The user's current delete choices, in the shape `plan_deletes` takes.
+fn delete_options<'a>(lib: &'a Library, settings: &'a Settings) -> DeleteOptions<'a> {
+    let library_ids: std::collections::HashSet<&str> =
+        lib.playlists.iter().map(|p| p.persistent_id.as_str()).collect();
+    DeleteOptions {
+        orphans: settings.delete_unused_songs,
+        cleanup_playlist_ids: settings.cleanup_playlist_ids.iter().map(|s| s.as_str()).collect(),
+        missing_playlists: settings
+            .remembered_playlists
+            .iter()
+            .filter(|r| !library_ids.contains(r.id.as_str()))
+            .map(|r| MissingPlaylist {
+                name: &r.name,
+                delete: matches!(r.action, PlaylistAction::Delete),
+            })
+            .collect(),
+        everything_else: settings.delete_everything_else,
+    }
+}
+
+/// Everything the next sync will delete. Shared by the preview and by
+/// `run_sync` so the two can't disagree.
+fn delete_plan(lib: &Library, settings: &Settings, scan: &LastScan) -> DeletePlan {
+    plan_deletes(
+        &classify_scan(lib, scan),
+        &lib.playlists,
+        &scan.device_playlist_paths,
+        &delete_options(lib, settings),
+    )
 }
 
 /// Compute what `run_sync` would actually do right now. Uses the same
@@ -2296,55 +2378,16 @@ fn compute_preview(
         })
         .collect();
 
-    let library_ids: std::collections::HashSet<&str> =
-        lib.playlists.iter().map(|p| p.persistent_id.as_str()).collect();
-    let remove_playlist_items: Vec<PreviewPlaylist> = settings
-        .remembered_playlists
+    let plan = delete_plan(lib, settings, last_scan);
+    let remove_playlist_items: Vec<PreviewPlaylist> = plan
+        .playlist_files
         .iter()
-        .filter(|r| !library_ids.contains(r.id.as_str()))
-        .filter(|r| matches!(r.action, PlaylistAction::Delete))
-        .map(|r| PreviewPlaylist {
-            name: r.name.clone(),
-            filename: format!("{}.m3u", r.name),
+        .map(|path| PreviewPlaylist {
+            name: device_playlist_basename(path),
+            filename: path.clone(),
         })
         .collect();
-
-    let cleanup_ids: std::collections::HashSet<&str> = settings
-        .cleanup_playlist_ids
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-    let checked_track_ids: std::collections::HashSet<&str> = lib
-        .playlists
-        .iter()
-        .filter(|p| p.checked)
-        .flat_map(|p| p.track_ids.iter().map(|s| s.as_str()))
-        .collect();
-    let mut device_path_by_size: std::collections::HashMap<u64, String> =
-        std::collections::HashMap::new();
-    for (p, sz) in &last_scan.device_files {
-        if p.to_ascii_lowercase().ends_with(".m3u") { continue; }
-        device_path_by_size.entry(*sz).or_insert_with(|| p.clone());
-    }
-    let mut to_delete: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if settings.delete_unused_songs {
-        for p in &last_scan.unused_device_paths {
-            to_delete.insert(p.clone());
-        }
-    }
-    for p in &lib.playlists {
-        if !cleanup_ids.contains(p.persistent_id.as_str()) { continue; }
-        for tid in &p.track_ids {
-            if checked_track_ids.contains(tid.as_str()) { continue; }
-            if let Some(t) = lib.tracks.get(tid) {
-                if let Some(path) = device_path_by_size.get(&t.size) {
-                    to_delete.insert(path.clone());
-                }
-            }
-        }
-    }
-    let mut paths: Vec<String> = to_delete.into_iter().collect();
-    paths.sort();
+    let paths = plan.track_paths;
 
     // For each path being deleted, look up its iTunes track (by matching
     // size against device_files) so we can display name + artist if we
@@ -2464,6 +2507,7 @@ fn main() {
             set_playlist_action,
             scan_device,
             set_delete_unused_songs,
+            set_delete_everything_else,
             set_verbose_sync_logging,
             set_verbose_connection_logging,
             toggle_cleanup_playlist,
@@ -2480,4 +2524,329 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error running MusicSync");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use musicsync_core::playlist::Playlist;
+    use musicsync_core::track::Track;
+    use std::collections::HashMap;
+
+    fn track(id: &str, size: u64, file: &str) -> (String, Track) {
+        (
+            id.to_string(),
+            Track {
+                id: id.into(),
+                name: format!("Song {id}"),
+                artist: "Artist".into(),
+                size,
+                local_path: String::new(),
+                device_path: format!("/sdcard/Music/{file}"),
+                on_device: false,
+            },
+        )
+    }
+
+    fn playlist(id: &str, name: &str, checked: bool, track_ids: &[&str]) -> Playlist {
+        Playlist {
+            name: name.into(),
+            playlist_id: id.into(),
+            persistent_id: id.into(),
+            track_ids: track_ids.iter().map(|s| s.to_string()).collect(),
+            checked,
+        }
+    }
+
+    /// Library tracks 1-4. "Keep" (checked) has 1 and 2; "Old" (unchecked)
+    /// has 2 and 3; track 4 is in no playlist. The phone has all four, a
+    /// file not in the library, Keep.m3u and Old.m3u, plus Gone.m3u. Gone
+    /// counts as an app-synced playlist only where a test remembers it;
+    /// otherwise it looks like one made on the phone.
+    fn library() -> Library {
+        Library {
+            music_folder: String::new(),
+            tracks: HashMap::from([
+                track("1", 1000, "A/one.mp3"),
+                track("2", 2000, "A/two.mp3"),
+                track("3", 3000, "B/three.mp3"),
+                track("4", 4000, "C/four.mp3"),
+            ]),
+            playlists: vec![
+                playlist("K", "Keep", true, &["1", "2"]),
+                playlist("O", "Old", false, &["2", "3"]),
+            ],
+        }
+    }
+
+    fn scan() -> LastScan {
+        let lists = ["Keep", "Old", "Gone"];
+        LastScan {
+            device_files: vec![
+                ("A/one.mp3".into(), 1000),
+                ("A/two.mp3".into(), 2000),
+                ("B/three.mp3".into(), 3000),
+                ("C/four.mp3".into(), 4000),
+                ("X/stray.mp3".into(), 9999),
+            ],
+            unused_device_paths: vec!["X/stray.mp3".into()],
+            device_playlist_line_counts: lists.iter().map(|n| (n.to_string(), 2)).collect(),
+            device_playlist_paths: lists
+                .iter()
+                .map(|n| (n.to_string(), format!("Playlists/{n}.m3u")))
+                .collect(),
+            timestamp_ms: 0,
+            music_root: "/sdcard/Music".into(),
+        }
+    }
+
+    fn remembered(id: &str, name: &str, action: PlaylistAction) -> RememberedPlaylist {
+        RememberedPlaylist { id: id.into(), name: name.into(), action }
+    }
+
+    fn report(errors: &[&str]) -> sync::SyncReport {
+        sync::SyncReport {
+            uploaded_tracks: 0,
+            uploaded_playlists: 0,
+            already_present: 4,
+            deleted_files: 2,
+            errors: errors.iter().map(|e| e.to_string()).collect(),
+        }
+    }
+
+    /// "Delete everything else" on, with Gone remembered as a playlist this
+    /// app synced (its action left at the default, Ignore).
+    fn everything_else_on() -> Settings {
+        Settings {
+            delete_everything_else: true,
+            remembered_playlists: vec![remembered("G", "Gone", PlaylistAction::Ignore)],
+            ..Settings::default()
+        }
+    }
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn device_playlist_basename_strips_folder_and_extension() {
+        assert_eq!(device_playlist_basename("Playlists/Old.m3u"), "Old");
+        assert_eq!(device_playlist_basename("Old.m3u"), "Old");
+        assert_eq!(device_playlist_basename("a/b/Rock & Roll.m3u"), "Rock & Roll");
+    }
+
+    #[test]
+    fn nothing_ticked_deletes_nothing() {
+        let plan = delete_plan(&library(), &Settings::default(), &scan());
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn delete_options_reflect_settings() {
+        let lib = library();
+        let settings = Settings {
+            delete_unused_songs: true,
+            delete_everything_else: true,
+            cleanup_playlist_ids: vec!["O".into()],
+            remembered_playlists: vec![
+                remembered("K", "Keep", PlaylistAction::Ignore),
+                remembered("G", "Gone", PlaylistAction::Delete),
+                remembered("Z", "Zed", PlaylistAction::Ignore),
+            ],
+            ..Settings::default()
+        };
+        let opts = delete_options(&lib, &settings);
+        assert!(opts.orphans);
+        assert!(opts.everything_else);
+        assert_eq!(opts.cleanup_playlist_ids, std::collections::HashSet::from(["O"]));
+        // Only remembered playlists no longer in the library count as missing.
+        let missing: Vec<(&str, bool)> =
+            opts.missing_playlists.iter().map(|m| (m.name, m.delete)).collect();
+        assert_eq!(missing, vec![("Gone", true), ("Zed", false)]);
+    }
+
+    #[test]
+    fn playlist_delete_box_removes_its_unwanted_tracks_and_its_file() {
+        let settings = Settings { cleanup_playlist_ids: vec!["O".into()], ..Settings::default() };
+        let plan = delete_plan(&library(), &settings, &scan());
+        // Track 2 is also in Keep, so only track 3 goes.
+        assert_eq!(plan.track_paths, vec!["B/three.mp3"]);
+        // Uses the playlist's real path on the phone.
+        assert_eq!(plan.playlist_files, vec!["Playlists/Old.m3u"]);
+    }
+
+    #[test]
+    fn playlist_file_not_on_phone_is_not_deleted() {
+        let settings = Settings { cleanup_playlist_ids: vec!["O".into()], ..Settings::default() };
+        let mut scan = scan();
+        scan.device_playlist_paths.remove("Old");
+        let plan = delete_plan(&library(), &settings, &scan);
+        assert_eq!(plan.track_paths, vec!["B/three.mp3"]);
+        assert!(plan.playlist_files.is_empty());
+    }
+
+    #[test]
+    fn missing_playlist_marked_delete_goes_only_while_on_phone() {
+        let settings = Settings {
+            remembered_playlists: vec![remembered("G", "Gone", PlaylistAction::Delete)],
+            ..Settings::default()
+        };
+        let plan = delete_plan(&library(), &settings, &scan());
+        assert_eq!(plan.playlist_files, vec!["Playlists/Gone.m3u"]);
+        assert!(plan.track_paths.is_empty());
+
+        let mut scan = scan();
+        scan.device_playlist_paths.remove("Gone");
+        assert!(delete_plan(&library(), &settings, &scan).is_empty());
+    }
+
+    #[test]
+    fn everything_else_makes_the_phone_match_the_selection() {
+        let settings = everything_else_on();
+        let plan = delete_plan(&library(), &settings, &scan());
+        assert_eq!(
+            sorted(plan.track_paths),
+            vec!["B/three.mp3", "C/four.mp3", "X/stray.mp3"],
+        );
+        // Keep.m3u stays; Old (unticked) and Gone (left the library) go.
+        assert_eq!(
+            sorted(plan.playlist_files),
+            vec!["Playlists/Gone.m3u", "Playlists/Old.m3u"],
+        );
+    }
+
+    #[test]
+    fn everything_else_keeps_playlists_made_on_the_phone() {
+        let settings = everything_else_on();
+        let mut scan = scan();
+        scan.device_playlist_paths.insert("Phone Mix".into(), "Phone Mix.m3u".into());
+        let plan = delete_plan(&library(), &settings, &scan);
+        assert!(!plan.playlist_files.iter().any(|p| p.contains("Phone Mix")));
+        // Gone is only deletable because the app remembers syncing it.
+        let forgotten = Settings { remembered_playlists: vec![], ..settings };
+        let plan = delete_plan(&library(), &forgotten, &scan);
+        assert_eq!(plan.playlist_files, vec!["Playlists/Old.m3u"]);
+    }
+
+    #[test]
+    fn preview_lists_exactly_what_the_plan_deletes() {
+        let lib = library();
+        let settings = everything_else_on();
+        let scan = scan();
+        let plan = delete_plan(&lib, &settings, &scan);
+        let preview = compute_preview(&lib, &settings, &scan);
+
+        assert_eq!(preview.delete_songs, plan.track_paths.len());
+        let paths: Vec<String> =
+            preview.delete_song_items.iter().map(|s| s.path.clone()).collect();
+        assert_eq!(sorted(paths), sorted(plan.track_paths.clone()));
+        // Library tracks get their name; the stray file has none.
+        let three = preview.delete_song_items.iter().find(|s| s.path == "B/three.mp3").unwrap();
+        assert_eq!(three.name, "Song 3");
+        let stray = preview.delete_song_items.iter().find(|s| s.path == "X/stray.mp3").unwrap();
+        assert_eq!(stray.name, "");
+
+        assert_eq!(preview.remove_playlists, plan.playlist_files.len());
+        let mut removed: Vec<(String, String)> = preview
+            .remove_playlist_items
+            .iter()
+            .map(|p| (p.name.clone(), p.filename.clone()))
+            .collect();
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec![
+                ("Gone".to_string(), "Playlists/Gone.m3u".to_string()),
+                ("Old".to_string(), "Playlists/Old.m3u".to_string()),
+            ],
+        );
+    }
+
+    #[test]
+    fn playlist_rows_show_delete_counts_only_when_unchecked() {
+        let lib = library();
+        let settings = Settings { cleanup_playlist_ids: vec!["O".into()], ..Settings::default() };
+        let scan = scan();
+        let (rows, _) = build_views_with_scan(&lib, &settings, Some(&scan));
+        let keep = rows.iter().find(|r| r.playlist_id == "K").unwrap();
+        let old = rows.iter().find(|r| r.playlist_id == "O").unwrap();
+
+        assert_eq!(keep.cleanup_count, None);
+        assert!(!keep.cleanup_playlist_file);
+        assert_eq!(old.cleanup_count, Some(1));
+        assert!(old.cleanup_playlist_file);
+        assert!(old.cleanup_checked);
+    }
+
+    #[test]
+    fn playlist_rows_have_no_delete_info_before_a_scan() {
+        let (rows, _) = build_views_with_scan(&library(), &Settings::default(), None);
+        assert!(rows.iter().all(|r| r.cleanup_count.is_none() && !r.cleanup_playlist_file));
+    }
+
+    #[test]
+    fn everything_else_row_counts_what_it_would_delete_even_when_off() {
+        let lib = library();
+        let scan = scan();
+        let off = Settings { delete_everything_else: false, ..everything_else_on() };
+        let view = library_view(&lib, String::new(), None, vec![], vec![], &off, Some(&scan), None);
+        let row = view.everything_else.unwrap();
+        assert_eq!((row.tracks, row.playlists, row.checked), (3, 2, false));
+        assert_eq!(view.orphan_count, Some(1));
+
+        let on = everything_else_on();
+        let view = library_view(&lib, String::new(), None, vec![], vec![], &on, Some(&scan), None);
+        assert!(view.everything_else.unwrap().checked);
+
+        let view = library_view(&lib, String::new(), None, vec![], vec![], &on, None, None);
+        assert!(view.everything_else.is_none());
+    }
+
+    #[test]
+    fn playlist_delete_boxes_clear_after_a_clean_sync() {
+        let mut settings = Settings {
+            cleanup_playlist_ids: vec!["O".into()],
+            delete_everything_else: true,
+            delete_unused_songs: true,
+            ..Settings::default()
+        };
+        assert!(clear_one_shot_deletes(&mut settings, &report(&[])));
+        assert!(settings.cleanup_playlist_ids.is_empty());
+        // The persistent boxes stay on.
+        assert!(settings.delete_everything_else);
+        assert!(settings.delete_unused_songs);
+        // Nothing left to clear, nothing to save.
+        assert!(!clear_one_shot_deletes(&mut settings, &report(&[])));
+    }
+
+    #[test]
+    fn playlist_delete_boxes_stay_after_a_failed_sync() {
+        let mut settings =
+            Settings { cleanup_playlist_ids: vec!["O".into()], ..Settings::default() };
+        assert!(!clear_one_shot_deletes(&mut settings, &report(&["couldn't delete x: busy"])));
+        assert_eq!(settings.cleanup_playlist_ids, vec!["O"]);
+    }
+
+    #[test]
+    fn rechecking_a_playlist_cancels_only_its_delete() {
+        let mut settings = Settings {
+            cleanup_playlist_ids: vec!["O".into(), "P".into()],
+            ..Settings::default()
+        };
+        cancel_playlist_delete(&mut settings, "O");
+        assert_eq!(settings.cleanup_playlist_ids, vec!["P"]);
+    }
+
+    #[test]
+    fn sync_summary_reports_delete_errors_without_flooding() {
+        let one = format_sync_summary(&report(&["couldn't delete a: busy"]), Default::default());
+        assert!(one.ends_with(" 1 error: couldn't delete a: busy"), "{one}");
+
+        let errors: Vec<String> = (1..=7).map(|i| format!("e{i}")).collect();
+        let refs: Vec<&str> = errors.iter().map(|s| s.as_str()).collect();
+        let many = format_sync_summary(&report(&refs), Default::default());
+        assert!(many.ends_with(" 7 errors: e1; e2; e3; e4; e5; and 2 more"), "{many}");
+        assert!(many.contains("deleted 2 files"), "{many}");
+    }
 }

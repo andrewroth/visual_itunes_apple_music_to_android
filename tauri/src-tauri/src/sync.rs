@@ -182,8 +182,8 @@ pub async fn run_sync(
         }
     };
 
-    // Delete playlists + any unused-track files. Server returns OK even
-    // when the path is absent, so we don't gate on the manifest content.
+    // Delete playlists + any unused-track files. The server returns OK
+    // when the path is already absent; real failures are reported.
     let mut deleted_files: usize = 0;
     let mut errors = Vec::new();
     for name in playlists_to_delete {
@@ -200,8 +200,13 @@ pub async fn run_sync(
         progress(&msg, frac);
         let _ = emit_client_progress(&mut sink, &msg, frac).await;
         let _ = send_msg(&mut sink, &ClientMessage::FileDelete { path: name.clone() }).await;
-        if let Ok(ServerMessage::FileDeleteOk { .. }) = recv_msg(&mut stream).await {
-            deleted_files += 1;
+        match recv_msg(&mut stream).await {
+            Ok(ServerMessage::FileDeleteOk { .. }) => deleted_files += 1,
+            Ok(ServerMessage::FileDeleteErr { message, .. }) => {
+                errors.push(format!("couldn't delete {name}: {message}"));
+            }
+            Ok(other) => errors.push(format!("couldn't delete {name}: unexpected reply {other:?}")),
+            Err(e) => errors.push(format!("couldn't delete {name}: {e}")),
         }
         completed_ops += 1;
     }
@@ -209,7 +214,7 @@ pub async fn run_sync(
         let step = completed_ops + 1;
         let pct = ((step as f32 / total_ops.max(1) as f32) * 100.0).round() as u32;
         let msg = format!(
-            "[{}/{}, {}%] Deleting unused {:?}",
+            "[{}/{}, {}%] Deleting {:?}",
             step,
             total_ops.max(1),
             pct,
@@ -219,8 +224,13 @@ pub async fn run_sync(
         progress(&msg, frac);
         let _ = emit_client_progress(&mut sink, &msg, frac).await;
         let _ = send_msg(&mut sink, &ClientMessage::FileDelete { path: path.clone() }).await;
-        if let Ok(ServerMessage::FileDeleteOk { .. }) = recv_msg(&mut stream).await {
-            deleted_files += 1;
+        match recv_msg(&mut stream).await {
+            Ok(ServerMessage::FileDeleteOk { .. }) => deleted_files += 1,
+            Ok(ServerMessage::FileDeleteErr { message, .. }) => {
+                errors.push(format!("couldn't delete {path}: {message}"));
+            }
+            Ok(other) => errors.push(format!("couldn't delete {path}: unexpected reply {other:?}")),
+            Err(e) => errors.push(format!("couldn't delete {path}: {e}")),
         }
         completed_ops += 1;
     }
@@ -504,3 +514,129 @@ async fn upload_playlist(
 
 #[allow(dead_code)]
 fn _force_use(_: &ManifestFile) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    /// A stand-in phone on a local port. Answers HELLO and MANIFEST_REQUEST,
+    /// then answers each FILE_DELETE via `reply` (None = drop the
+    /// connection). Returns the ws URL and the paths it was asked to delete.
+    async fn fake_phone(
+        reply: fn(&str) -> Option<ServerMessage>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let (mut sink, mut stream) = ws.split();
+            let mut asked = Vec::new();
+            while let Some(Ok(frame)) = stream.next().await {
+                let Message::Text(text) = frame else { continue };
+                let answer = match serde_json::from_str::<ClientMessage>(&text).unwrap() {
+                    ClientMessage::Hello { .. } => Some(ServerMessage::HelloOk {
+                        device_id: "phone".into(),
+                        device_name: "Phone".into(),
+                        music_root: "/sdcard/Music".into(),
+                        protocol_version: PROTOCOL_VERSION,
+                    }),
+                    ClientMessage::ManifestRequest => Some(ServerMessage::Manifest {
+                        files: vec![],
+                        playlists: vec![],
+                    }),
+                    ClientMessage::FileDelete { path } => {
+                        asked.push(path.clone());
+                        match reply(&path) {
+                            Some(r) => Some(r),
+                            None => break,
+                        }
+                    }
+                    ClientMessage::Bye => break,
+                    _ => None,
+                };
+                if let Some(a) = answer {
+                    let json = serde_json::to_string(&a).unwrap();
+                    sink.send(Message::Text(json.into())).await.unwrap();
+                }
+            }
+            asked
+        });
+        (url, handle)
+    }
+
+    async fn sync_deletes(url: &str, playlists: &[String], tracks: &[String]) -> SyncReport {
+        let mut lib_tracks = HashMap::new();
+        run_sync(
+            url,
+            "token",
+            &mut lib_tracks,
+            &[],
+            playlists,
+            tracks,
+            Arc::new(AtomicBool::new(false)),
+            |_, _| {},
+            || {},
+            |_, _| {},
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn deletes_playlists_then_tracks_and_counts_them() {
+        let (url, phone) = fake_phone(|p| Some(ServerMessage::FileDeleteOk { path: p.into() })).await;
+        let report = sync_deletes(
+            &url,
+            &["Old.m3u".into()],
+            &["A/one.mp3".into(), "B/two.mp3".into()],
+        )
+        .await;
+        assert_eq!(report.deleted_files, 3);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(phone.await.unwrap(), vec!["Old.m3u", "A/one.mp3", "B/two.mp3"]);
+    }
+
+    #[tokio::test]
+    async fn reports_a_delete_the_phone_refuses() {
+        let (url, phone) = fake_phone(|p| {
+            if p == "B/two.mp3" {
+                Some(ServerMessage::FileDeleteErr { path: p.into(), message: "read-only".into() })
+            } else {
+                Some(ServerMessage::FileDeleteOk { path: p.into() })
+            }
+        })
+        .await;
+        let report = sync_deletes(&url, &[], &["A/one.mp3".into(), "B/two.mp3".into()]).await;
+        assert_eq!(report.deleted_files, 1);
+        assert_eq!(report.errors, vec!["couldn't delete B/two.mp3: read-only"]);
+        phone.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_an_unexpected_reply_to_a_delete() {
+        let (url, phone) = fake_phone(|p| Some(ServerMessage::FileOk { path: p.into() })).await;
+        let report = sync_deletes(&url, &["Old.m3u".into()], &[]).await;
+        assert_eq!(report.deleted_files, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert!(
+            report.errors[0].starts_with("couldn't delete Old.m3u: unexpected reply"),
+            "{:?}",
+            report.errors,
+        );
+        phone.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_every_delete_left_when_the_connection_drops() {
+        let (url, phone) = fake_phone(|_| None).await;
+        let report = sync_deletes(&url, &[], &["A/one.mp3".into(), "B/two.mp3".into()]).await;
+        assert_eq!(report.deleted_files, 0);
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(report.errors[0].starts_with("couldn't delete A/one.mp3: "));
+        assert!(report.errors[1].starts_with("couldn't delete B/two.mp3: "));
+        phone.await.unwrap();
+    }
+}

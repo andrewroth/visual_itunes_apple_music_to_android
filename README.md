@@ -58,6 +58,16 @@ iTunes and Apple Music can keep a copy of your library as XML that updates whene
 2. Tick **Share iTunes Library XML with other applications**.
 3. In the desktop app, browse to `iTunes Library.xml` in your iTunes folder, usually `Music\iTunes` in your user folder.
 
+### Removing music from the phone
+
+Nothing is ever deleted from the phone unless you tick a Delete box, and Sync always shows what will be deleted and asks you to confirm first. The boxes appear in the playlist table once the phone has been scanned, and only when there's something to delete:
+
+- **A playlist you've stopped syncing:** untick the playlist, then tick the Delete box on its row. That removes the playlist from the phone, along with its tracks that aren't in any playlist you're still syncing. The box is one-shot: it clears itself after the sync.
+- **Tracks not in your Music Library:** the yellow row with this name covers files in the phone's music folder that don't match anything in your library, such as leftovers or files copied by hand.
+- **Everything not in a synced playlist:** one box that makes the phone match your selection. On every sync it removes all of the above, plus library tracks that aren't in any playlist. It stays on until you untick it. Playlists you created on the phone itself are kept.
+
+A track that is also in a playlist you're still syncing is never deleted. Folders left empty by a delete are removed too.
+
 ## Screenshots
 
 <img width="60%" alt="image" src="https://github.com/user-attachments/assets/09cac717-974f-4d54-b0e2-41e0a22dd0cb" />
